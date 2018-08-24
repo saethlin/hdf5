@@ -1,0 +1,8 @@
+[package]
+name = "nom_hdf5"
+version = "0.1.0"
+authors = ["Ben Kimock <kimockb@gmail.com>"]
+
+[dependencies]
+nom = "4.0"
+
