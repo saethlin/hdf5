@@ -1,8 +1,4 @@
-#[macro_use]
-extern crate nom;
-
-use nom::{le_u16, le_u32, le_u64, le_u8};
-use std::io::{Read, Seek, SeekFrom};
+use nom::*;
 
 #[derive(Debug)]
 struct Hdf5Superblock {
@@ -74,9 +70,10 @@ struct SymbolTable {
 
 named_args!(parse_symbol_table (offset_size: u8) <SymbolTable>,
     do_parse!(
+        tag!(b"SNOD") >>
         version: le_u8 >>
         tag!(b"\0") >>
-        number_of_symbols: le_u32 >>
+        number_of_symbols: le_u16 >>
         entries: count!(call!(hdf5_symbol_table_entry, offset_size), number_of_symbols as usize) >>
         (SymbolTable {
             version,
@@ -213,6 +210,19 @@ named_args!(hdf5_node (offset_size: u8) <BtreeNode>,
     )
 );
 
+/*
+named_args!(hdf5_node (offset_size: u8) <BtreeNode>,
+    do_parse!(
+        tag!(b"TREE") >>
+        node_type: le_u8 >>
+        node_level: le_u8 >>
+        entries_used: le_u16 >>
+        address_of_left_sibling: call!(address, offset_size) >>
+        address_of_right_sibling: call!(address, offset_size) >>
+    )
+);
+*/
+
 named_args!(parse_group_node (offset_size: u8) <BtreeNode>,
     do_parse!(
         node_level: le_u8 >>
@@ -272,52 +282,174 @@ named_args!(parse_local_heap (offset_size: u8, length_size: u8) <LocalHeap>,
     )
 );
 
-fn main() -> Result<(), std::io::Error> {
-    let f = std::fs::File::open("../tot_SMC.h5")?;
-    let mut reader = std::io::BufReader::new(f);
+#[derive(Debug)]
+struct ObjectHeader {
+    version: u8,
+    total_number_of_header_messages: u16,
+    object_reference_count: u32,
+    object_header_size: u32,
+    //message: HeaderMessageType,
+    messages: Vec<HeaderMessageType>,
+}
+
+#[cfg_attr(rustfmt, rustfmt_skip)]
+named!(parse_object_header <ObjectHeader>,
+    do_parse!(
+        version: le_u8 >>
+        tag!(b"\0") >>
+        total_number_of_header_messages: le_u16 >>
+        object_reference_count: le_u32 >>
+        object_header_size: le_u32 >>
+        //message: parse_header_message >>
+        messages: count!(call!(parse_header_message), total_number_of_header_messages as usize) >>
+        (ObjectHeader {
+            version,
+            total_number_of_header_messages,
+            object_reference_count,
+            object_header_size,
+            messages,
+        })
+
+    )
+);
+
+#[derive(Debug)]
+enum HeaderMessageType {
+    Nil,
+    Dataspace,
+    LinkInfo,
+    DataType,
+    DataStorageFillValue,
+    Link,
+    DataStorageExternal,
+    DataLayout,
+    Bogus,
+    GroupInfo,
+    DataStorageFilterPipeline,
+    Attribute,
+    ObjectComment,
+    SharedMessageTable,
+    ObjectHeaderContinuation,
+    SymbolTable,
+    ObjectModificationTime,
+    BtreeKValues,
+    DriverInfo,
+    AttributeInfo,
+    ObjectReferenceCount,
+}
+
+use HeaderMessageType::*;
+
+#[cfg_attr(rustfmt, rustfmt_skip)]
+named!(parse_header_message <HeaderMessageType>,
+    do_parse!(
+        message_type: le_u16 >>
+        message_size: le_u16 >>
+        flags: le_u8 >>
+        //tag!(b"\0\0\0") >>
+        take!(3) >>
+        take!(message_size) >>
+        ({
+            println!("{:08b}", flags);
+            match message_type {
+            // These are hex because the docs use hex
+            0x0 => Nil,
+            0x1 => Dataspace,
+            0x2 => LinkInfo,
+            0x3 => DataType,
+            0x5 => DataStorageFillValue,
+            0x6 => Link,
+            0x7 => DataStorageExternal,
+            0x8 => DataLayout,
+            0x9 => Bogus,
+            0xA => GroupInfo,
+            0xB => DataStorageFilterPipeline,
+            0xC => Attribute,
+            0xD => ObjectComment,
+            0xF => SharedMessageTable,
+            0x10 => ObjectHeaderContinuation,
+            0x11 => SymbolTable,
+            0x12 => ObjectModificationTime,
+            0x13 => BtreeKValues,
+            0x14 => DriverInfo,
+            0x15 => AttributeInfo,
+            0x16 => ObjectReferenceCount,
+            _ => panic!("Invalid header message type"),
+
+        }})
+    )
+);
+
+// This assumes version 0
+fn main() {
+    let file = std::fs::read("test.hdf5").unwrap();
 
     // Read the superblock
-    let mut buf = [0u8; 100];
-    reader.read_exact(&mut buf)?;
-    let superblock = parse_superblock(&buf).unwrap().1;
+    let superblock = parse_superblock(&file).unwrap().1;
     println!("{:#?}", superblock);
 
     // Read the local heap
-    reader.seek(SeekFrom::Start(
-        superblock
+    let heap = parse_local_heap(
+        &file[superblock
             .root_group_symbol_table_entry
-            .address_of_name_heap,
-    ))?;
-
-    let mut buf = [0u8; 32];
-    reader.read_exact(&mut buf)?;
-    let heap = parse_local_heap(&buf, superblock.offset_size, superblock.length_size)
-        .unwrap()
-        .1;
+            .address_of_name_heap as usize..],
+        superblock.offset_size,
+        superblock.length_size,
+    )
+    .unwrap()
+    .1;
     println!("{:#?}", heap);
+
+    let name = &file[(superblock.root_group_symbol_table_entry.link_name_offset
+        + heap.address_of_data_segment) as usize..]
+        .iter()
+        .take_while(|b| **b != 0)
+        .map(|b| *b as char)
+        .collect::<String>();
+    println!("name is: {:?}", name);
+
+    let header = parse_object_header(
+        &file[superblock
+            .root_group_symbol_table_entry
+            .object_header_address as usize..],
+    )
+    .unwrap()
+    .1;
+    println!("{:#?}", header);
 
     // Now having read the superblock and heap we can start traversing the Btree structure
 
     // Read the btree root node
-    reader.seek(SeekFrom::Start(
-        superblock.root_group_symbol_table_entry.address_of_btree,
-    ))?;
-
-    let mut buf = [0u8; 40];
-    reader.read_exact(&mut buf)?;
-    let root_node = hdf5_node(&buf, superblock.offset_size).unwrap().1;
+    let root_node = hdf5_node(
+        &file[superblock.root_group_symbol_table_entry.address_of_btree as usize..],
+        superblock.offset_size,
+    )
+    .unwrap()
+    .1;
     println!("{:#?}", root_node);
 
-    // Read the next node down
+    // If we parsed a group node, read the next node down
     if let BtreeNode::GroupNode { entries, .. } = root_node {
-        let mut buf = [0u8; 40];
-        reader.seek(SeekFrom::Start(
-            entries[0].byte_offset_into_local_heap + heap.address_of_data_segment,
-        ))?;
-        reader.read_exact(&mut buf)?;
-        let other_node = hdf5_node(&buf, superblock.offset_size).unwrap().1;
-        println!("{:#?}", other_node);
-    }
+        let table = parse_symbol_table(
+            &file[entries[0].pointer_to_symbol_table as usize..],
+            superblock.offset_size,
+        )
+        .unwrap()
+        .1;
+        println!("{:#?}", table);
+        // Read the name of the symbol table entry out of the local heap
+        let name = &file
+            [(table.entries[0].link_name_offset + heap.address_of_data_segment) as usize..]
+            .iter()
+            .take_while(|b| **b != 0)
+            .map(|b| *b as char)
+            .collect::<String>();
+        println!("name is: {}", name);
 
-    Ok(())
+        // Read the object header
+        let header = parse_object_header(&file[table.entries[0].object_header_address as usize..])
+            .unwrap()
+            .1;
+        println!("{:#?}", header);
+    }
 }
