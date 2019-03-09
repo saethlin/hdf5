@@ -1,15 +1,16 @@
 use nom::*;
 
+mod error;
+use error::Hdf5Error;
+
 #[derive(Debug)]
 struct Hdf5Superblock {
     superblock_version: u8,
     free_space_storage_version: u8,
     root_group_symbol_table_entry_version: u8,
-    // reserved 0 byte
     shared_header_message_format_version: u8,
     offset_size: u8,
     length_size: u8,
-    // reserved 0 byte
     group_leaf_node_k: u16,
     group_internal_node_k: u16,
     file_consistency_flags: u32,
@@ -210,19 +211,6 @@ named_args!(hdf5_node (offset_size: u8) <BtreeNode>,
     )
 );
 
-/*
-named_args!(hdf5_node (offset_size: u8) <BtreeNode>,
-    do_parse!(
-        tag!(b"TREE") >>
-        node_type: le_u8 >>
-        node_level: le_u8 >>
-        entries_used: le_u16 >>
-        address_of_left_sibling: call!(address, offset_size) >>
-        address_of_right_sibling: call!(address, offset_size) >>
-    )
-);
-*/
-
 named_args!(parse_group_node (offset_size: u8) <BtreeNode>,
     do_parse!(
         node_level: le_u8 >>
@@ -288,7 +276,6 @@ struct ObjectHeader {
     total_number_of_header_messages: u16,
     object_reference_count: u32,
     object_header_size: u32,
-    //message: HeaderMessageType,
     messages: Vec<HeaderMessageType>,
 }
 
@@ -300,8 +287,7 @@ named!(parse_object_header <ObjectHeader>,
         total_number_of_header_messages: le_u16 >>
         object_reference_count: le_u32 >>
         object_header_size: le_u32 >>
-        //message: parse_header_message >>
-        messages: count!(call!(parse_header_message), total_number_of_header_messages as usize) >>
+        messages: count!(parse_header_message, total_number_of_header_messages as usize) >>
         (ObjectHeader {
             version,
             total_number_of_header_messages,
@@ -309,7 +295,6 @@ named!(parse_object_header <ObjectHeader>,
             object_header_size,
             messages,
         })
-
     )
 );
 
@@ -338,19 +323,16 @@ enum HeaderMessageType {
     ObjectReferenceCount,
 }
 
-use HeaderMessageType::*;
-
 #[cfg_attr(rustfmt, rustfmt_skip)]
 named!(parse_header_message <HeaderMessageType>,
     do_parse!(
         message_type: le_u16 >>
         message_size: le_u16 >>
-        flags: le_u8 >>
-        //tag!(b"\0\0\0") >>
-        take!(3) >>
+        _flags: le_u8 >>
+        tag!(b"\0\0\0") >>
         take!(message_size) >>
         ({
-            println!("{:08b}", flags);
+            use HeaderMessageType::*;
             match message_type {
             // These are hex because the docs use hex
             0x0 => Nil,
@@ -381,11 +363,11 @@ named!(parse_header_message <HeaderMessageType>,
 );
 
 // This assumes version 0
-fn main() {
-    let file = std::fs::read("test.hdf5").unwrap();
+fn main() -> Result<(), Hdf5Error> {
+    let file = std::fs::read("empty.hdf5")?;
 
     // Read the superblock
-    let superblock = parse_superblock(&file).unwrap().1;
+    let superblock = parse_superblock(&file)?.1;
     println!("{:#?}", superblock);
 
     // Read the local heap
@@ -395,25 +377,15 @@ fn main() {
             .address_of_name_heap as usize..],
         superblock.offset_size,
         superblock.length_size,
-    )
-    .unwrap()
+    )?
     .1;
     println!("{:#?}", heap);
-
-    let name = &file[(superblock.root_group_symbol_table_entry.link_name_offset
-        + heap.address_of_data_segment) as usize..]
-        .iter()
-        .take_while(|b| **b != 0)
-        .map(|b| *b as char)
-        .collect::<String>();
-    println!("name is: {:?}", name);
 
     let header = parse_object_header(
         &file[superblock
             .root_group_symbol_table_entry
             .object_header_address as usize..],
-    )
-    .unwrap()
+    )?
     .1;
     println!("{:#?}", header);
 
@@ -423,33 +395,34 @@ fn main() {
     let root_node = hdf5_node(
         &file[superblock.root_group_symbol_table_entry.address_of_btree as usize..],
         superblock.offset_size,
-    )
-    .unwrap()
+    )?
     .1;
     println!("{:#?}", root_node);
 
     // If we parsed a group node, read the next node down
     if let BtreeNode::GroupNode { entries, .. } = root_node {
-        let table = parse_symbol_table(
-            &file[entries[0].pointer_to_symbol_table as usize..],
-            superblock.offset_size,
-        )
-        .unwrap()
-        .1;
-        println!("{:#?}", table);
-        // Read the name of the symbol table entry out of the local heap
-        let name = &file
-            [(table.entries[0].link_name_offset + heap.address_of_data_segment) as usize..]
-            .iter()
-            .take_while(|b| **b != 0)
-            .map(|b| *b as char)
-            .collect::<String>();
-        println!("name is: {}", name);
-
-        // Read the object header
-        let header = parse_object_header(&file[table.entries[0].object_header_address as usize..])
-            .unwrap()
+        for entry in entries {
+            let table = parse_symbol_table(
+                &file[entry.pointer_to_symbol_table as usize..],
+                superblock.offset_size,
+            )?
             .1;
-        println!("{:#?}", header);
+            println!("{:#?}", table);
+            // Read the name of the symbol table entry out of the local heap
+            let name = &file
+                [(table.entries[0].link_name_offset + heap.address_of_data_segment) as usize..]
+                .iter()
+                .take_while(|b| **b != 0)
+                .map(|b| *b as char)
+                .collect::<String>();
+            println!("name is: {}", name);
+
+            // Read the object header
+            let header =
+                parse_object_header(&file[table.entries[0].object_header_address as usize..])?.1;
+            println!("{:#?}", header);
+        }
     }
+
+    Ok(())
 }
