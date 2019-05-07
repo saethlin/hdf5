@@ -43,7 +43,7 @@ named!(parse_superblock<&[u8], Hdf5Superblock>,
         address_of_file_free_space_info: call!(address, offset_size) >>
         end_of_file_address: call!(address, offset_size) >>
         driver_information_block_address: call!(address, offset_size) >>
-        root_group_symbol_table_entry: call!(hdf5_symbol_table_entry, offset_size) >>
+        root_group_symbol_table_entry: call!(parse_symbol_table_entry, offset_size) >>
         (Hdf5Superblock {
             superblock_version,
             free_space_storage_version,
@@ -75,7 +75,7 @@ named_args!(parse_symbol_table (offset_size: u8) <SymbolTable>,
         version: le_u8 >>
         tag!(b"\0") >>
         number_of_symbols: le_u16 >>
-        entries: count!(call!(hdf5_symbol_table_entry, offset_size), number_of_symbols as usize) >>
+        entries: count!(call!(parse_symbol_table_entry, offset_size), number_of_symbols as usize) >>
         (SymbolTable {
             version,
             entries,
@@ -92,7 +92,7 @@ struct SymbolTableEntry {
     address_of_name_heap: u64,
 }
 
-named_args!(hdf5_symbol_table_entry (offset_size: u8) <SymbolTableEntry>,
+named_args!(parse_symbol_table_entry (offset_size: u8) <SymbolTableEntry>,
     do_parse!(
         link_name_offset: call!(address, offset_size) >>
         object_header_address: call!(address, offset_size) >>
@@ -276,18 +276,19 @@ struct ObjectHeader {
     total_number_of_header_messages: u16,
     object_reference_count: u32,
     object_header_size: u32,
-    messages: Vec<HeaderMessageType>,
+    messages: Vec<HeaderMessage>,
 }
 
 #[cfg_attr(rustfmt, rustfmt_skip)]
-named!(parse_object_header <ObjectHeader>,
+named_args!(parse_object_header (n: usize) <ObjectHeader>,
     do_parse!(
         version: le_u8 >>
         tag!(b"\0") >>
         total_number_of_header_messages: le_u16 >>
         object_reference_count: le_u32 >>
         object_header_size: le_u32 >>
-        messages: count!(parse_header_message, total_number_of_header_messages as usize) >>
+        take!(4) >> // This needs to be variable, to ensure that we are 8-byte aligned
+        messages: count!(parse_header_message, n) >> //total_number_of_header_messages as usize) >>
         (ObjectHeader {
             version,
             total_number_of_header_messages,
@@ -299,11 +300,23 @@ named!(parse_object_header <ObjectHeader>,
 );
 
 #[derive(Debug)]
-enum HeaderMessageType {
+enum HeaderMessage {
     Nil,
-    Dataspace,
-    LinkInfo,
-    DataType,
+    Dataspace {
+        version: u8,
+        dimensionality: u8,
+        flags: u8,
+        dimensions: Vec<u64>,
+    },
+    //LinkInfo,
+    // TODO: Not sure if I just want an enum of Rust types here instead
+    DataType {
+        class: u8,
+        version: u8,
+        class_bitfields: u32,
+        size: u32,
+    }
+    /*
     DataStorageFillValue,
     Link,
     DataStorageExternal,
@@ -314,57 +327,96 @@ enum HeaderMessageType {
     Attribute,
     ObjectComment,
     SharedMessageTable,
-    ObjectHeaderContinuation,
-    SymbolTable,
+    */
+    ObjectHeaderContinuation {
+        offset: u64,
+        length: u64,
+    },
+    SymbolTable {
+        btree_address: u64,
+        local_heap_address: u64,
+    },
+    /*
     ObjectModificationTime,
     BtreeKValues,
     DriverInfo,
     AttributeInfo,
     ObjectReferenceCount,
+    */
 }
 
 #[cfg_attr(rustfmt, rustfmt_skip)]
-named!(parse_header_message <HeaderMessageType>,
+named!(parse_header_message <HeaderMessage>,
     do_parse!(
         message_type: le_u16 >>
         message_size: le_u16 >>
         _flags: le_u8 >>
         tag!(b"\0\0\0") >>
-        take!(message_size) >>
-        ({
-            use HeaderMessageType::*;
-            match message_type {
-            // These are hex because the docs use hex
-            0x0 => Nil,
-            0x1 => Dataspace,
-            0x2 => LinkInfo,
-            0x3 => DataType,
-            0x5 => DataStorageFillValue,
-            0x6 => Link,
-            0x7 => DataStorageExternal,
-            0x8 => DataLayout,
-            0x9 => Bogus,
-            0xA => GroupInfo,
-            0xB => DataStorageFilterPipeline,
-            0xC => Attribute,
-            0xD => ObjectComment,
-            0xF => SharedMessageTable,
-            0x10 => ObjectHeaderContinuation,
-            0x11 => SymbolTable,
-            0x12 => ObjectModificationTime,
-            0x13 => BtreeKValues,
-            0x14 => DriverInfo,
-            0x15 => AttributeInfo,
-            0x16 => ObjectReferenceCount,
-            _ => panic!("Invalid header message type"),
-
-        }})
+        message: switch!(value!(message_type),
+            0x0 => value!(HeaderMessage::Nil) |
+            0x1 => do_parse!(
+                version: le_u8 >>
+                dimensionality: le_u8 >>
+                flags: le_u8 >>
+                take!(5) >> // not reqired to be zero, oddly
+                dimensions: count!(apply!(address, 8), dimensionality as usize) >>
+                _max_dimensions: cond!(flags == 1, count!(apply!(address, 8), dimensionality as usize)) >>
+                (HeaderMessage::Dataspace {
+                    version,
+                    dimensionality,
+                    flags,
+                    dimensions,
+                })
+            ) |
+            0x3 => DataType |
+            0x10 => do_parse!(
+                offset: call!(address, 8) >>
+                length: call!(address, 8) >>
+                (HeaderMessage::ObjectHeaderContinuation {
+                    length,
+                    offset,
+                })
+            ) |
+            0x11 => do_parse!(
+                btree_address: call!(address, 8) >>
+                local_heap_address: call!(address, 8) >>
+                (HeaderMessage::SymbolTable {
+                    btree_address,
+                    local_heap_address,
+                })
+            ) |
+            _ => value!(HeaderMessage::ObjectHeaderContinuation{
+                length: message_type as u64,
+                offset: 0,
+            })
+        ) >>
+        (message)
     )
 );
 
+/*
+0x0 => HeaderMessage::Nil |
+0x2 => LinkInfo |
+0x5 => DataStorageFillValue |
+0x6 => Link |
+0x7 => DataStorageExternal |
+0x8 => DataLayout |
+0x9 => Bogus |
+0xA => GroupInfo |
+0xB => DataStorageFilterPipeline |
+0xC => Attribute |
+0xD => ObjectComment |
+0xF => SharedMessageTable |
+0x12 => ObjectModificationTime |
+0x13 => BtreeKValues |
+0x14 => DriverInfo |
+0x15 => AttributeInfo |
+0x16 => ObjectReferenceCount |
+*/
+
 // This assumes version 0
 fn main() -> Result<(), Hdf5Error> {
-    let file = std::fs::read("empty.hdf5")?;
+    let file = std::fs::read("test.hdf5")?;
 
     // Read the superblock
     let superblock = parse_superblock(&file)?.1;
@@ -385,9 +437,42 @@ fn main() -> Result<(), Hdf5Error> {
         &file[superblock
             .root_group_symbol_table_entry
             .object_header_address as usize..],
+        1,
     )?
     .1;
     println!("{:#?}", header);
+
+    if let HeaderMessage::ObjectHeaderContinuation { offset, .. } = header.messages[0] {
+        let message = parse_header_message(&file[offset as usize..])?.1;
+        println!("{:#?}", message);
+        if let HeaderMessage::SymbolTable { btree_address, .. } = message {
+            let node = hdf5_node(&file[btree_address as usize..], superblock.offset_size)?.1;
+            println!("{:#?}", node);
+            if let BtreeNode::GroupNode { entries, .. } = node {
+                let table = parse_symbol_table(
+                    &file[entries[0].pointer_to_symbol_table as usize..],
+                    superblock.offset_size,
+                )?
+                .1;
+                println!("{:#?}", table);
+                let name = &file
+                    [(table.entries[0].link_name_offset + heap.address_of_data_segment) as usize..]
+                    .iter()
+                    .take_while(|b| **b != 0)
+                    .map(|b| *b as char)
+                    .collect::<String>();
+                println!("name is: {}", name);
+                let header = parse_object_header(
+                    &file[table.entries[0].object_header_address as usize..],
+                    2,
+                )?
+                .1;
+                println!("{:#?}", header);
+            }
+        }
+    }
+
+    return Ok(());
 
     // Now having read the superblock and heap we can start traversing the Btree structure
 
@@ -417,9 +502,12 @@ fn main() -> Result<(), Hdf5Error> {
                 .collect::<String>();
             println!("name is: {}", name);
 
+            // TODO: need to leave breadcrumbs for myself next time...
+            // What's going on here?
+
             // Read the object header
             let header =
-                parse_object_header(&file[table.entries[0].object_header_address as usize..])?.1;
+                parse_object_header(&file[table.entries[0].object_header_address as usize..], 1)?.1;
             println!("{:#?}", header);
         }
     }
