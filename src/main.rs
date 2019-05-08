@@ -301,7 +301,7 @@ named_args!(parse_object_header (n: usize) <ObjectHeader>,
 
 #[derive(Debug)]
 enum HeaderMessage {
-    Nil,
+    //Nil,
     Dataspace {
         version: u8,
         dimensionality: u8,
@@ -309,22 +309,41 @@ enum HeaderMessage {
         dimensions: Vec<u64>,
     },
     //LinkInfo,
-    // TODO: Not sure if I just want an enum of Rust types here instead
     DataType {
-        class: u8,
         version: u8,
+        class: u8,
         class_bitfields: u32,
         size: u32,
-    }
+        properties: Vec<u8>,
+    },
+    DataStorageFillValue {
+        version: u8,
+        space_allocation_time: u8,
+        fill_value_write_time: u8,
+        fill_value_defined: u8,
+        size: Option<u32>,
+        fill_value: Option<Vec<u8>>,
+    },
     /*
-    DataStorageFillValue,
     Link,
     DataStorageExternal,
-    DataLayout,
+    */
+    DataLayout {
+        address: u64,
+        size: u64,
+    },
+    /*
     Bogus,
     GroupInfo,
     DataStorageFilterPipeline,
-    Attribute,
+    */
+    Attribute {
+        datatype: Box<HeaderMessage>,
+        dataspace: Box<HeaderMessage>,
+        data: Vec<u8>,
+        name: String,
+    },
+    /*
     ObjectComment,
     SharedMessageTable,
     */
@@ -336,14 +355,51 @@ enum HeaderMessage {
         btree_address: u64,
         local_heap_address: u64,
     },
+    ObjectModificationTime {
+        seconds_after_unix_epoch: u32,
+    },
     /*
-    ObjectModificationTime,
     BtreeKValues,
     DriverInfo,
     AttributeInfo,
     ObjectReferenceCount,
     */
 }
+
+#[cfg_attr(rustfmt, rustfmt_skip)]
+named_args!(parse_datatype (message_size: u16) <HeaderMessage>,
+    do_parse!(
+        class_and_version: le_u8 >>
+        class_bitfields: le_u24 >>
+        size: le_u32 >>
+        properties: count!(le_u8, message_size as usize - 8) >>
+        (HeaderMessage::DataType {
+            version: class_and_version >> 4,
+            class: class_and_version & 0b00001111,
+            class_bitfields,
+            size,
+            properties,
+        })
+    )
+);
+
+#[cfg_attr(rustfmt, rustfmt_skip)]
+named!(parse_dataspace  <HeaderMessage>,
+    do_parse!(
+        version: le_u8 >>
+        dimensionality: le_u8 >>
+        flags: le_u8 >>
+        take!(5) >> // not reqired to be zero, oddly
+        dimensions: count!(apply!(address, 8), dimensionality as usize) >>
+        _max_dimensions: cond!(flags == 1, count!(apply!(address, 8), dimensionality as usize)) >>
+        (HeaderMessage::Dataspace {
+            version,
+            dimensionality,
+            flags,
+            dimensions,
+        })
+    )
+);
 
 #[cfg_attr(rustfmt, rustfmt_skip)]
 named!(parse_header_message <HeaderMessage>,
@@ -353,22 +409,53 @@ named!(parse_header_message <HeaderMessage>,
         _flags: le_u8 >>
         tag!(b"\0\0\0") >>
         message: switch!(value!(message_type),
-            0x0 => value!(HeaderMessage::Nil) |
-            0x1 => do_parse!(
+            //0x0 => value!(HeaderMessage::Nil) |
+            0x1 => call!(parse_dataspace) |
+            0x3 => call!(parse_datatype, message_size) |
+            0x5 => do_parse!(
                 version: le_u8 >>
-                dimensionality: le_u8 >>
-                flags: le_u8 >>
-                take!(5) >> // not reqired to be zero, oddly
-                dimensions: count!(apply!(address, 8), dimensionality as usize) >>
-                _max_dimensions: cond!(flags == 1, count!(apply!(address, 8), dimensionality as usize)) >>
-                (HeaderMessage::Dataspace {
+                space_allocation_time: le_u8 >>
+                fill_value_write_time: le_u8 >>
+                fill_value_defined: le_u8 >>
+                size: cond!(!(version > 1 && fill_value_defined == 0), le_u32) >>
+                fill_value: cond!(size.is_some(), count!(le_u8, size.unwrap() as usize)) >>
+                (HeaderMessage::DataStorageFillValue {
                     version,
-                    dimensionality,
-                    flags,
-                    dimensions,
+                    space_allocation_time,
+                    fill_value_write_time,
+                    fill_value_defined,
+                    size,
+                    fill_value,
                 })
             ) |
-            0x3 => DataType |
+            0x8 => do_parse!(
+                tag!([3u8]) >> // version 3, only implement version 3 because I'm lazy
+                tag!([1u8]) >> // layout class 1, contiguious storage
+                data_address: call!(address, 8) >>
+                size: call!(address, 8) >>
+                take!(6) >> // TODO: pad to a multiple of 8 bytes
+                (HeaderMessage::DataLayout {
+                    address: data_address,
+                    size,
+                })
+            ) |
+            0xC => do_parse!(
+                tag!([1]) >> // we only handle version 1
+                tag!([0]) >>
+                name_size: le_u16 >>
+                datatype_size: le_u16 >>
+                dataspace_size: le_u16 >>
+                name: take!(pad8(name_size)) >>
+                datatype: call!(parse_datatype, pad8(datatype_size) as u16) >>
+                dataspace: parse_dataspace >>
+                data: take!(message_size as usize - (8 + pad8(name_size) + pad8(datatype_size) + pad8(dataspace_size))) >>
+                (HeaderMessage::Attribute {
+                    name: name.iter().take_while(|b| **b > 0).map(|b| *b as char).collect::<String>(),
+                    datatype: Box::new(datatype),
+                    dataspace: Box::new(dataspace),
+                    data: data.to_vec(),
+                })
+            ) |
             0x10 => do_parse!(
                 offset: call!(address, 8) >>
                 length: call!(address, 8) >>
@@ -385,12 +472,21 @@ named!(parse_header_message <HeaderMessage>,
                     local_heap_address,
                 })
             ) |
-            _ => value!(HeaderMessage::ObjectHeaderContinuation{
-                length: message_type as u64,
-                offset: 0,
+            0x12 => do_parse!(
+                tag!([1]) >> // version 1 is the only one allowed by the standard
+                tag!(b"\0\0\0") >>
+                seconds: le_u32 >>
+                (HeaderMessage::ObjectModificationTime {
+                    seconds_after_unix_epoch: seconds,
+                })
+            ) |
+            _ => value!(
+            HeaderMessage::ObjectHeaderContinuation{
+                offset: message_type as u64,
+                length: 0,
             })
         ) >>
-        (message)
+        (std::dbg!(message))
     )
 );
 
@@ -413,6 +509,42 @@ named!(parse_header_message <HeaderMessage>,
 0x15 => AttributeInfo |
 0x16 => ObjectReferenceCount |
 */
+
+fn padding_for<T>(t: T) -> usize
+where
+    usize: From<T>,
+{
+    let t = usize::from(t);
+    if t % 8 == 0 {
+        0
+    } else {
+        8 - (t % 8)
+    }
+}
+#[test]
+fn test_padding() {
+    assert!(pad_for(0u8) == 0);
+    assert!(pad_for(1u8) == 7);
+    assert!(pad_for(2u8) == 6);
+    assert!(pad_for(3u8) == 5);
+    assert!(pad_for(4u8) == 4);
+    assert!(pad_for(5u8) == 3);
+    assert!(pad_for(6u8) == 2);
+    assert!(pad_for(7u8) == 1);
+    assert!(pad_for(8u8) == 0);
+}
+
+fn pad8<T>(t: T) -> usize
+where
+    usize: From<T>,
+{
+    let t = usize::from(t);
+    if t % 8 == 0 {
+        t
+    } else {
+        t + (8 - (t % 8))
+    }
+}
 
 // This assumes version 0
 fn main() -> Result<(), Hdf5Error> {
@@ -464,7 +596,7 @@ fn main() -> Result<(), Hdf5Error> {
                 println!("name is: {}", name);
                 let header = parse_object_header(
                     &file[table.entries[0].object_header_address as usize..],
-                    2,
+                    6,
                 )?
                 .1;
                 println!("{:#?}", header);

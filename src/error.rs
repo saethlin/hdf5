@@ -18,8 +18,6 @@ impl From<nom::Err<&[u8]>> for Hdf5Error {
             Incomplete(_) => Hdf5Error::Parse(format!("Incomplete: {:?}", e)),
             Error(Context::Code(_, e)) => Hdf5Error::Parse(format!("Error: {:?}", e)),
             Failure(Context::Code(_, e)) => Hdf5Error::Parse(format!("Failure: {:?}", e)),
-            Error(e) => Hdf5Error::Parse(format!("Error: {:?}", e)),
-            Failure(e) => Hdf5Error::Parse(format!("Error: {:?}", e)),
         }
     }
 }
