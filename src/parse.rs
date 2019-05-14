@@ -1,31 +1,28 @@
 use nom::*;
 
-mod error;
-use error::Hdf5Error;
-
 #[derive(Debug)]
-struct Hdf5Superblock {
-    superblock_version: u8,
-    free_space_storage_version: u8,
-    root_group_symbol_table_entry_version: u8,
-    shared_header_message_format_version: u8,
-    offset_size: u8,
-    length_size: u8,
-    group_leaf_node_k: u16,
-    group_internal_node_k: u16,
-    file_consistency_flags: u32,
-    base_address: u64,
-    address_of_file_free_space_info: u64,
-    end_of_file_address: u64,
-    driver_information_block_address: u64,
-    root_group_symbol_table_entry: SymbolTableEntry,
+pub struct Hdf5Superblock {
+    pub superblock_version: u8,
+    pub free_space_storage_version: u8,
+    pub root_group_symbol_table_entry_version: u8,
+    pub shared_header_message_format_version: u8,
+    pub offset_size: u8,
+    pub length_size: u8,
+    pub group_leaf_node_k: u16,
+    pub group_internal_node_k: u16,
+    pub file_consistency_flags: u32,
+    pub base_address: u64,
+    pub address_of_file_free_space_info: u64,
+    pub end_of_file_address: u64,
+    pub driver_information_block_address: u64,
+    pub root_group_symbol_table_entry: SymbolTableEntry,
 }
 
 named_args!(address (len: u8) <u64>,
    map!(take!(len), |x| le_u64(x).unwrap().1)
 );
 
-named!(parse_superblock<&[u8], Hdf5Superblock>,
+named!(pub parse_superblock<&[u8], Hdf5Superblock>,
     do_parse!(
         tag!(b"\x89\x48\x44\x46\x0d\x0a\x1a\x0a") >>
         superblock_version: le_u8 >>
@@ -64,12 +61,12 @@ named!(parse_superblock<&[u8], Hdf5Superblock>,
 );
 
 #[derive(Debug)]
-struct SymbolTable {
-    version: u8,
-    entries: Vec<SymbolTableEntry>,
+pub struct SymbolTable {
+    pub version: u8,
+    pub entries: Vec<SymbolTableEntry>,
 }
 
-named_args!(parse_symbol_table (offset_size: u8) <SymbolTable>,
+named_args!(pub parse_symbol_table (offset_size: u8) <SymbolTable>,
     do_parse!(
         tag!(b"SNOD") >>
         version: le_u8 >>
@@ -84,15 +81,15 @@ named_args!(parse_symbol_table (offset_size: u8) <SymbolTable>,
 );
 
 #[derive(Debug)]
-struct SymbolTableEntry {
-    link_name_offset: u64,
-    object_header_address: u64,
-    cache_type: u32,
-    address_of_btree: u64,
-    address_of_name_heap: u64,
+pub struct SymbolTableEntry {
+    pub link_name_offset: u64,
+    pub object_header_address: u64,
+    pub cache_type: u32,
+    pub address_of_btree: u64,
+    pub address_of_name_heap: u64,
 }
 
-named_args!(parse_symbol_table_entry (offset_size: u8) <SymbolTableEntry>,
+named_args!(pub parse_symbol_table_entry (offset_size: u8) <SymbolTableEntry>,
     do_parse!(
         link_name_offset: call!(address, offset_size) >>
         object_header_address: call!(address, offset_size) >>
@@ -111,23 +108,23 @@ named_args!(parse_symbol_table_entry (offset_size: u8) <SymbolTableEntry>,
 );
 
 #[derive(Debug)]
-struct Key {
-    chunk_size: u32,
-    filter_mask: u32,
-    axis_offsets: Vec<u64>,
+pub struct Key {
+    pub chunk_size: u32,
+    pub filter_mask: u32,
+    pub axis_offsets: Vec<u64>,
 }
 
-named!(
-    parse_key<Key>,
+#[cfg_attr(rustfmt, rustfmt_skip)]
+named!(pub parse_key<Key>,
     do_parse!(
-        chunk_size: le_u32
-            >> filter_mask: le_u32
-            >> axis_offsets: read_until_zero
-            >> (Key {
-                chunk_size,
-                filter_mask,
-                axis_offsets,
-            })
+        chunk_size: le_u32 >>
+        filter_mask: le_u32 >>
+        axis_offsets: read_until_zero >>
+        (Key {
+            chunk_size,
+            filter_mask,
+            axis_offsets,
+        })
     )
 );
 
@@ -146,14 +143,14 @@ fn read_until_zero(remaining: &[u8]) -> nom::IResult<&[u8], Vec<u64>> {
     }
 }
 
-#[derive(Debug)]
-struct GroupEntry {
-    byte_offset_into_local_heap: u64,
-    pointer_to_symbol_table: u64,
+#[derive(Debug, Clone)]
+pub struct GroupEntry {
+    pub byte_offset_into_local_heap: u64,
+    pub pointer_to_symbol_table: u64,
 }
 
 #[cfg_attr(rustfmt, rustfmt_skip)]
-named!(parse_group_entry<GroupEntry>,
+named!(pub parse_group_entry<GroupEntry>,
     do_parse!(
         byte_offset_into_local_heap: le_u64 >>
         pointer_to_symbol_table: le_u64 >>
@@ -165,9 +162,9 @@ named!(parse_group_entry<GroupEntry>,
 );
 
 #[derive(Debug)]
-struct DataChunkEntry {
-    key: Key,
-    pointer_to_data_chunk: u64,
+pub struct DataChunkEntry {
+    pub key: Key,
+    pub pointer_to_data_chunk: u64,
 }
 
 #[cfg_attr(rustfmt, rustfmt_skip)]
@@ -183,7 +180,7 @@ named!(parse_data_chunk_entry<DataChunkEntry>,
 );
 
 #[derive(Debug)]
-enum BtreeNode {
+pub enum BtreeNode {
     DataChunkNode {
         node_level: u8,
         entries_used: u16,
@@ -200,7 +197,7 @@ enum BtreeNode {
     },
 }
 
-named_args!(hdf5_node (offset_size: u8) <BtreeNode>,
+named_args!(pub hdf5_node (offset_size: u8) <BtreeNode>,
     do_parse!(
         tag!(b"TREE") >>
         node: switch!( le_u8,
@@ -246,14 +243,14 @@ named_args!(parse_data_chunk_node (offset_size: u8) <BtreeNode>,
 );
 
 #[derive(Debug)]
-struct LocalHeap {
-    version: u8,
-    data_segment_size: u64,
-    offset_to_head_of_freelist: u64,
-    address_of_data_segment: u64,
+pub struct LocalHeap {
+    pub version: u8,
+    pub data_segment_size: u64,
+    pub offset_to_head_of_freelist: u64,
+    pub address_of_data_segment: u64,
 }
 
-named_args!(parse_local_heap (offset_size: u8, length_size: u8) <LocalHeap>,
+named_args!(pub parse_local_heap (offset_size: u8, length_size: u8) <LocalHeap>,
     do_parse!(
         tag!(b"HEAP") >>
         version: le_u8 >>
@@ -271,16 +268,16 @@ named_args!(parse_local_heap (offset_size: u8, length_size: u8) <LocalHeap>,
 );
 
 #[derive(Debug)]
-struct ObjectHeader {
-    version: u8,
-    total_number_of_header_messages: u16,
-    object_reference_count: u32,
-    object_header_size: u32,
-    messages: Vec<HeaderMessage>,
+pub struct ObjectHeader {
+    pub version: u8,
+    pub total_number_of_header_messages: u16,
+    pub object_reference_count: u32,
+    pub object_header_size: u32,
+    pub messages: Vec<header::Message>,
 }
 
 #[cfg_attr(rustfmt, rustfmt_skip)]
-named_args!(parse_object_header (n: usize) <ObjectHeader>,
+named_args!(pub parse_object_header (n: usize) <ObjectHeader>,
     do_parse!(
         version: le_u8 >>
         tag!(b"\0") >>
@@ -299,81 +296,102 @@ named_args!(parse_object_header (n: usize) <ObjectHeader>,
     )
 );
 
-#[derive(Debug)]
-enum HeaderMessage {
-    //Nil,
-    Dataspace {
-        version: u8,
-        dimensionality: u8,
-        flags: u8,
-        dimensions: Vec<u64>,
-    },
-    //LinkInfo,
-    DataType {
-        version: u8,
-        class: u8,
-        class_bitfields: u32,
-        size: u32,
-        properties: Vec<u8>,
-    },
-    DataStorageFillValue {
-        version: u8,
-        space_allocation_time: u8,
-        fill_value_write_time: u8,
-        fill_value_defined: u8,
-        size: Option<u32>,
-        fill_value: Option<Vec<u8>>,
-    },
-    /*
-    Link,
-    DataStorageExternal,
-    */
-    DataLayout {
-        address: u64,
-        size: u64,
-    },
-    /*
-    Bogus,
-    GroupInfo,
-    DataStorageFilterPipeline,
-    */
-    Attribute {
-        datatype: Box<HeaderMessage>,
-        dataspace: Box<HeaderMessage>,
-        data: Vec<u8>,
-        name: String,
-    },
-    /*
-    ObjectComment,
-    SharedMessageTable,
-    */
-    ObjectHeaderContinuation {
-        offset: u64,
-        length: u64,
-    },
-    SymbolTable {
-        btree_address: u64,
-        local_heap_address: u64,
-    },
-    ObjectModificationTime {
-        seconds_after_unix_epoch: u32,
-    },
-    /*
-    BtreeKValues,
-    DriverInfo,
-    AttributeInfo,
-    ObjectReferenceCount,
-    */
+pub mod header {
+    #[derive(Debug, Clone)]
+    pub struct Dataspace {
+        pub version: u8,
+        pub dimensionality: u8,
+        pub flags: u8,
+        pub dimensions: Vec<u64>,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct DataType {
+        pub version: u8,
+        pub class: u8,
+        pub class_bitfields: u32,
+        pub size: u32,
+        pub properties: Vec<u8>,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct DataStorageFillValue {
+        pub version: u8,
+        pub space_allocation_time: u8,
+        pub fill_value_write_time: u8,
+        pub fill_value_defined: u8,
+        pub size: Option<u32>,
+        pub fill_value: Option<Vec<u8>>,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct DataLayout {
+        pub address: u64,
+        pub size: u64,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct Attribute {
+        pub datatype: DataType,
+        pub dataspace: Dataspace,
+        pub data: Vec<u8>,
+        pub name: String,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct ObjectHeaderContinuation {
+        pub offset: u64,
+        pub length: u64,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct SymbolTable {
+        pub btree_address: u64,
+        pub local_heap_address: u64,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct ObjectModificationTime {
+        pub seconds_after_unix_epoch: u32,
+    }
+
+    #[derive(Debug, Clone)]
+    pub enum Message {
+        Nil,
+        Dataspace(Dataspace),
+        //LinkInfo,
+        DataType(DataType),
+        DataStorageFillValue(DataStorageFillValue),
+        /*
+        Link,
+        DataStorageExternal,
+        */
+        DataLayout(DataLayout),
+        Attribute(Attribute),
+        /*
+        ObjectComment,
+        SharedMessageTable,
+        */
+        ObjectHeaderContinuation(ObjectHeaderContinuation),
+        SymbolTable(SymbolTable),
+        ObjectModificationTime(ObjectModificationTime),
+        /*
+        BtreeKValues,
+        DriverInfo,
+        AttributeInfo,
+        ObjectReferenceCount,
+        */
+    }
 }
 
 #[cfg_attr(rustfmt, rustfmt_skip)]
-named_args!(parse_datatype (message_size: u16) <HeaderMessage>,
+named_args!(parse_datatype (message_size: u16) <header::DataType>,
     do_parse!(
         class_and_version: le_u8 >>
         class_bitfields: le_u24 >>
         size: le_u32 >>
         properties: count!(le_u8, message_size as usize - 8) >>
-        (HeaderMessage::DataType {
+        (header::DataType {
             version: class_and_version >> 4,
             class: class_and_version & 0b00001111,
             class_bitfields,
@@ -384,7 +402,7 @@ named_args!(parse_datatype (message_size: u16) <HeaderMessage>,
 );
 
 #[cfg_attr(rustfmt, rustfmt_skip)]
-named!(parse_dataspace  <HeaderMessage>,
+named!(parse_dataspace <header::Dataspace>,
     do_parse!(
         version: le_u8 >>
         dimensionality: le_u8 >>
@@ -392,7 +410,7 @@ named!(parse_dataspace  <HeaderMessage>,
         take!(5) >> // not reqired to be zero, oddly
         dimensions: count!(apply!(address, 8), dimensionality as usize) >>
         _max_dimensions: cond!(flags == 1, count!(apply!(address, 8), dimensionality as usize)) >>
-        (HeaderMessage::Dataspace {
+        (header::Dataspace {
             version,
             dimensionality,
             flags,
@@ -402,114 +420,125 @@ named!(parse_dataspace  <HeaderMessage>,
 );
 
 #[cfg_attr(rustfmt, rustfmt_skip)]
-named!(parse_header_message <HeaderMessage>,
+named!(parse_fill_value <header::DataStorageFillValue>,
+    do_parse!(
+        version: le_u8 >>
+        space_allocation_time: le_u8 >>
+        fill_value_write_time: le_u8 >>
+        fill_value_defined: le_u8 >>
+        size: cond!(!(version > 1 && fill_value_defined == 0), le_u32) >>
+        fill_value: cond!(size.is_some(), count!(le_u8, size.unwrap() as usize)) >>
+        (header::DataStorageFillValue {
+            version,
+            space_allocation_time,
+            fill_value_write_time,
+            fill_value_defined,
+            size,
+            fill_value,
+        })
+    )
+);
+
+#[cfg_attr(rustfmt, rustfmt_skip)]
+named!(parse_data_layout <header::DataLayout>,
+    do_parse!(
+        tag!([3u8]) >> // version 3, only implement version 3 because I'm lazy
+        tag!([1u8]) >> // layout class 1, contiguious storage
+        data_address: call!(address, 8) >>
+        size: call!(address, 8) >>
+        take!(6) >> // TODO: pad to a multiple of 8 bytes
+        (header::DataLayout {
+            address: data_address,
+            size,
+        })
+    )
+);
+
+#[cfg_attr(rustfmt, rustfmt_skip)]
+named_args!(parse_attribute (message_size: u16) <header::Attribute>,
+    do_parse!(
+        tag!([1]) >> // we only handle version 1
+        tag!([0]) >>
+        name_size: le_u16 >>
+        datatype_size: le_u16 >>
+        dataspace_size: le_u16 >>
+        name: take!(pad8(name_size)) >>
+        datatype: call!(parse_datatype, datatype_size) >>
+        dataspace: parse_dataspace >>
+        data: take!(message_size as usize - (8 + pad8(name_size) + pad8(datatype_size) + pad8(dataspace_size))) >>
+        (header::Attribute {
+            name: name.iter().take_while(|b| **b > 0).map(|b| *b as char).collect::<String>(),
+            datatype,
+            dataspace,
+            data: data.to_vec(),
+        })
+    )
+);
+
+#[cfg_attr(rustfmt, rustfmt_skip)]
+named!(parse_object_header_continuation <header::ObjectHeaderContinuation>,
+    do_parse!(
+        offset: call!(address, 8) >>
+        length: call!(address, 8) >>
+        (header::ObjectHeaderContinuation {
+            length,
+            offset,
+        })
+    )
+);
+
+#[cfg_attr(rustfmt, rustfmt_skip)]
+named!(parse_symbol_table_message <header::SymbolTable>,
+    do_parse!(
+        btree_address: call!(address, 8) >>
+        local_heap_address: call!(address, 8) >>
+        (header::SymbolTable {
+            btree_address,
+            local_heap_address,
+        })
+    )
+);
+
+#[cfg_attr(rustfmt, rustfmt_skip)]
+named!(parse_object_modification_time <header::ObjectModificationTime>,
+    do_parse!(
+        tag!([1]) >> // version 1 is the only one allowed by the standard
+        tag!(b"\0\0\0") >>
+        seconds: le_u32 >>
+        (header::ObjectModificationTime {
+            seconds_after_unix_epoch: seconds,
+        })
+    )
+);
+
+#[cfg_attr(rustfmt, rustfmt_skip)]
+named!(parse_header_message <header::Message>,
     do_parse!(
         message_type: le_u16 >>
         message_size: le_u16 >>
         _flags: le_u8 >>
         tag!(b"\0\0\0") >>
         message: switch!(value!(message_type),
-            //0x0 => value!(HeaderMessage::Nil) |
-            0x1 => call!(parse_dataspace) |
-            0x3 => call!(parse_datatype, message_size) |
-            0x5 => do_parse!(
-                version: le_u8 >>
-                space_allocation_time: le_u8 >>
-                fill_value_write_time: le_u8 >>
-                fill_value_defined: le_u8 >>
-                size: cond!(!(version > 1 && fill_value_defined == 0), le_u32) >>
-                fill_value: cond!(size.is_some(), count!(le_u8, size.unwrap() as usize)) >>
-                (HeaderMessage::DataStorageFillValue {
-                    version,
-                    space_allocation_time,
-                    fill_value_write_time,
-                    fill_value_defined,
-                    size,
-                    fill_value,
-                })
-            ) |
-            0x8 => do_parse!(
-                tag!([3u8]) >> // version 3, only implement version 3 because I'm lazy
-                tag!([1u8]) >> // layout class 1, contiguious storage
-                data_address: call!(address, 8) >>
-                size: call!(address, 8) >>
-                take!(6) >> // TODO: pad to a multiple of 8 bytes
-                (HeaderMessage::DataLayout {
-                    address: data_address,
-                    size,
-                })
-            ) |
-            0xC => do_parse!(
-                tag!([1]) >> // we only handle version 1
-                tag!([0]) >>
-                name_size: le_u16 >>
-                datatype_size: le_u16 >>
-                dataspace_size: le_u16 >>
-                name: take!(pad8(name_size)) >>
-                datatype: call!(parse_datatype, pad8(datatype_size) as u16) >>
-                dataspace: parse_dataspace >>
-                data: take!(message_size as usize - (8 + pad8(name_size) + pad8(datatype_size) + pad8(dataspace_size))) >>
-                (HeaderMessage::Attribute {
-                    name: name.iter().take_while(|b| **b > 0).map(|b| *b as char).collect::<String>(),
-                    datatype: Box::new(datatype),
-                    dataspace: Box::new(dataspace),
-                    data: data.to_vec(),
-                })
-            ) |
-            0x10 => do_parse!(
-                offset: call!(address, 8) >>
-                length: call!(address, 8) >>
-                (HeaderMessage::ObjectHeaderContinuation {
-                    length,
-                    offset,
-                })
-            ) |
-            0x11 => do_parse!(
-                btree_address: call!(address, 8) >>
-                local_heap_address: call!(address, 8) >>
-                (HeaderMessage::SymbolTable {
-                    btree_address,
-                    local_heap_address,
-                })
-            ) |
-            0x12 => do_parse!(
-                tag!([1]) >> // version 1 is the only one allowed by the standard
-                tag!(b"\0\0\0") >>
-                seconds: le_u32 >>
-                (HeaderMessage::ObjectModificationTime {
-                    seconds_after_unix_epoch: seconds,
-                })
-            ) |
+            0x0 => value!(header::Message::Nil) |
+            0x1 => map!(call!(parse_dataspace), header::Message::Dataspace) |
+            0x3 => map!(call!(parse_datatype, message_size), header::Message::DataType) |
+            0x5 => map!(call!(parse_fill_value), header::Message::DataStorageFillValue) |
+            0x8 => map!(call!(parse_data_layout), header::Message::DataLayout) |
+            0xC => map!(call!(parse_attribute, message_size), header::Message::Attribute) |
+            0x10 => map!(call!(parse_object_header_continuation), header::Message::ObjectHeaderContinuation) |
+            0x11 => map!(call!(parse_symbol_table_message), header::Message::SymbolTable) |
+            0x12 => map!(call!(parse_object_modification_time), header::Message::ObjectModificationTime) |
             _ => value!(
-            HeaderMessage::ObjectHeaderContinuation{
+            header::Message::ObjectHeaderContinuation(header::ObjectHeaderContinuation{
                 offset: message_type as u64,
                 length: 0,
-            })
+            }))
         ) >>
-        (std::dbg!(message))
+        (message)
     )
 );
 
 /*
-0x0 => HeaderMessage::Nil |
-0x2 => LinkInfo |
-0x5 => DataStorageFillValue |
-0x6 => Link |
-0x7 => DataStorageExternal |
-0x8 => DataLayout |
-0x9 => Bogus |
-0xA => GroupInfo |
-0xB => DataStorageFilterPipeline |
-0xC => Attribute |
-0xD => ObjectComment |
-0xF => SharedMessageTable |
-0x12 => ObjectModificationTime |
-0x13 => BtreeKValues |
-0x14 => DriverInfo |
-0x15 => AttributeInfo |
-0x16 => ObjectReferenceCount |
-*/
-
 fn padding_for<T>(t: T) -> usize
 where
     usize: From<T>,
@@ -521,18 +550,20 @@ where
         8 - (t % 8)
     }
 }
+
 #[test]
 fn test_padding() {
-    assert!(pad_for(0u8) == 0);
-    assert!(pad_for(1u8) == 7);
-    assert!(pad_for(2u8) == 6);
-    assert!(pad_for(3u8) == 5);
-    assert!(pad_for(4u8) == 4);
-    assert!(pad_for(5u8) == 3);
-    assert!(pad_for(6u8) == 2);
-    assert!(pad_for(7u8) == 1);
-    assert!(pad_for(8u8) == 0);
+    assert!(padding_for(0u8) == 0);
+    assert!(padding_for(1u8) == 7);
+    assert!(padding_for(2u8) == 6);
+    assert!(padding_for(3u8) == 5);
+    assert!(padding_for(4u8) == 4);
+    assert!(padding_for(5u8) == 3);
+    assert!(padding_for(6u8) == 2);
+    assert!(padding_for(7u8) == 1);
+    assert!(padding_for(8u8) == 0);
 }
+*/
 
 fn pad8<T>(t: T) -> usize
 where
@@ -547,7 +578,8 @@ where
 }
 
 // This assumes version 0
-fn main() -> Result<(), Hdf5Error> {
+/*
+fn main() -> Result<(), crate::Error> {
     let file = std::fs::read("test.hdf5")?;
 
     // Read the superblock
@@ -646,3 +678,4 @@ fn main() -> Result<(), Hdf5Error> {
 
     Ok(())
 }
+*/

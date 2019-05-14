@@ -11,3 +11,6 @@ with h5py.File('test.hdf5', 'w') as f:
     '''
     f['test_dataset'] = np.arange(100, dtype=np.float64)
     f['test_dataset'].attrs['dset_attr_name'] = b'dset_attr_contents'
+    f['test_dataset2'] = np.arange(2, 100, dtype=np.float64)
+    g = f.create_group('test_group')
+    g['tg_dataset'] = np.arange(10, dtype=np.float64)
