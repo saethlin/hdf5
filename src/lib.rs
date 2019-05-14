@@ -1,45 +1,53 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap; // Currently use BTreeMap just to get sorted Debug output
 use std::path::Path;
 
 mod error;
 mod parse;
 pub use error::Error;
 
-#[derive(Debug)]
-pub struct Hdf5File {
-    map: memmap::Mmap,
-    root_attributes: HashMap<String, Attribute>,
-    root_datasets: HashMap<String, Dataset>,
-    groups: HashMap<String, Group>,
+pub fn open<P: AsRef<Path>>(path: P) -> Result<Hdf5File, Error> {
+    Hdf5File::open(path)
 }
 
-impl Hdf5File {
-    pub fn view<T: Hdf5Type>(&self, name: &str) -> &[T] {
-        let dataset = self.root_datasets.get(name).unwrap();
-        if T::dtype() != dataset.dtype {
-            panic!("invalid type passed to view");
-        }
-        unsafe {
-            use std::ops::Deref;
-            let data_start = self.map.deref().as_ptr().offset(dataset.address as isize) as *const T;
-            std::slice::from_raw_parts(data_start, dataset.size as usize / std::mem::size_of::<T>())
-        }
+pub struct Hdf5File {
+    map: memmap::Mmap,
+    root_attributes: BTreeMap<String, Attribute>,
+    root_datasets: BTreeMap<String, Dataset>,
+    groups: BTreeMap<String, Group>,
+}
+
+impl std::fmt::Debug for Hdf5File {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.debug_struct("Hdf5File")
+            .field("root_attributes", &self.root_attributes)
+            .field("root_datasets", &self.root_datasets)
+            .field("groups", &self.groups)
+            .finish()
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct Group {
     name: String,
-    datasets: HashMap<String, Dataset>,
-    attributes: HashMap<String, Attribute>,
+    datasets: BTreeMap<String, Dataset>,
+    attributes: BTreeMap<String, Attribute>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Dataset {
     dimensions: Vec<u64>,
     dtype: Hdf5Dtype,
     address: u64,
     size: u64,
+}
+
+impl std::fmt::Debug for Dataset {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.debug_struct("Dataset")
+            .field("dimensions", &self.dimensions)
+            .field("dtype", &self.dtype)
+            .finish()
+    }
 }
 
 impl Dataset {
@@ -137,8 +145,7 @@ impl Hdf5File {
             unreachable!("Root node ought to be a group node");
         };
 
-        let mut root_datasets = HashMap::new();
-        let groups = HashMap::new();
+        let mut root_datasets = BTreeMap::new();
 
         for root_group in root_groups {
             let table = parse::parse_symbol_table(
@@ -196,10 +203,22 @@ impl Hdf5File {
 
         Ok(Hdf5File {
             map: contents,
-            groups,
+            groups: BTreeMap::new(),
             root_datasets,
-            root_attributes: HashMap::new(),
+            root_attributes: BTreeMap::new(),
         })
+    }
+
+    pub fn view<T: Hdf5Type>(&self, name: &str) -> &[T] {
+        let dataset = self.root_datasets.get(name).unwrap();
+        if T::dtype() != dataset.dtype {
+            panic!("invalid type passed to view");
+        }
+        unsafe {
+            use std::ops::Deref;
+            let data_start = self.map.deref().as_ptr().offset(dataset.address as isize) as *const T;
+            std::slice::from_raw_parts(data_start, dataset.size as usize / std::mem::size_of::<T>())
+        }
     }
 }
 
