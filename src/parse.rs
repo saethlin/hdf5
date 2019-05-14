@@ -1,3 +1,4 @@
+use nom::dbg;
 use nom::*;
 
 #[derive(Debug)]
@@ -107,42 +108,6 @@ named_args!(pub parse_symbol_table_entry (offset_size: u8) <SymbolTableEntry>,
     )
 );
 
-#[derive(Debug)]
-pub struct Key {
-    pub chunk_size: u32,
-    pub filter_mask: u32,
-    pub axis_offsets: Vec<u64>,
-}
-
-#[cfg_attr(rustfmt, rustfmt_skip)]
-named!(pub parse_key<Key>,
-    do_parse!(
-        chunk_size: le_u32 >>
-        filter_mask: le_u32 >>
-        axis_offsets: read_until_zero >>
-        (Key {
-            chunk_size,
-            filter_mask,
-            axis_offsets,
-        })
-    )
-);
-
-fn read_until_zero(remaining: &[u8]) -> nom::IResult<&[u8], Vec<u64>> {
-    let mut output = Vec::new();
-    loop {
-        match le_u64(remaining) {
-            Ok((remaining, val)) => {
-                if val == 0 {
-                    return Ok((remaining, output));
-                }
-                output.push(val);
-            }
-            Err(e) => return Err(e),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct GroupEntry {
     pub byte_offset_into_local_heap: u64,
@@ -162,77 +127,31 @@ named!(pub parse_group_entry<GroupEntry>,
 );
 
 #[derive(Debug)]
-pub struct DataChunkEntry {
-    pub key: Key,
-    pub pointer_to_data_chunk: u64,
+pub struct GroupNode {
+    pub node_level: u8,
+    pub entries_used: u16,
+    pub address_of_left_sibling: u64,
+    pub address_of_right_sibling: u64,
+    pub entries: Vec<GroupEntry>,
 }
 
-#[cfg_attr(rustfmt, rustfmt_skip)]
-named!(parse_data_chunk_entry<DataChunkEntry>,
-    do_parse!(
-        key: parse_key >>
-        pointer_to_data_chunk: le_u64 >>
-        (DataChunkEntry {
-            key,
-            pointer_to_data_chunk,
-        })
-    )
-);
-
-#[derive(Debug)]
-pub enum BtreeNode {
-    DataChunkNode {
-        node_level: u8,
-        entries_used: u16,
-        address_of_left_sibling: u64,
-        address_of_right_sibling: u64,
-        entries: Vec<DataChunkEntry>,
-    },
-    GroupNode {
-        node_level: u8,
-        entries_used: u16,
-        address_of_left_sibling: u64,
-        address_of_right_sibling: u64,
-        entries: Vec<GroupEntry>,
-    },
-}
-
-named_args!(pub hdf5_node (offset_size: u8) <BtreeNode>,
+named_args!(pub hdf5_node (offset_size: u8) <GroupNode>,
     do_parse!(
         tag!(b"TREE") >>
-        node: switch!( le_u8,
-            0 => call!(parse_group_node, offset_size) |
-            1 => call!(parse_data_chunk_node, offset_size)
-        ) >>
+        tag!([0]) >> // We only support group nodes
+        node: call!(parse_group_node, offset_size) >>
         (node)
     )
 );
 
-named_args!(parse_group_node (offset_size: u8) <BtreeNode>,
+named_args!(parse_group_node (offset_size: u8) <GroupNode>,
     do_parse!(
         node_level: le_u8 >>
         entries_used: le_u16 >>
         address_of_left_sibling: call!(address, offset_size) >>
         address_of_right_sibling: call!(address, offset_size) >>
         entries: count!(parse_group_entry, entries_used as usize) >>
-        (BtreeNode::GroupNode {
-            node_level,
-            entries_used,
-            address_of_left_sibling,
-            address_of_right_sibling,
-            entries,
-        })
-    )
-);
-
-named_args!(parse_data_chunk_node (offset_size: u8) <BtreeNode>,
-    do_parse!(
-        node_level: le_u8 >>
-        entries_used: le_u16 >>
-        address_of_left_sibling: call!(address, offset_size) >>
-        address_of_right_sibling: call!(address, offset_size) >>
-        entries: count!(parse_data_chunk_entry, entries_used as usize) >>
-        (BtreeNode::DataChunkNode {
+        (GroupNode {
             node_level,
             entries_used,
             address_of_left_sibling,
@@ -252,7 +171,7 @@ pub struct LocalHeap {
 
 named_args!(pub parse_local_heap (offset_size: u8, length_size: u8) <LocalHeap>,
     do_parse!(
-        tag!(b"HEAP") >>
+        dbg!(tag!(b"HEAP")) >>
         version: le_u8 >>
         tag!(b"\0\0\0") >>
         data_segment_size: call!(address, length_size) >>
@@ -273,25 +192,22 @@ pub struct ObjectHeader {
     pub total_number_of_header_messages: u16,
     pub object_reference_count: u32,
     pub object_header_size: u32,
-    pub messages: Vec<header::Message>,
 }
 
 #[cfg_attr(rustfmt, rustfmt_skip)]
-named_args!(pub parse_object_header (n: usize) <ObjectHeader>,
+named!(pub parse_object_header <ObjectHeader>,
     do_parse!(
         version: le_u8 >>
-        tag!(b"\0") >>
+        dbg!(tag!(b"\0")) >>
         total_number_of_header_messages: le_u16 >>
         object_reference_count: le_u32 >>
         object_header_size: le_u32 >>
         take!(4) >> // This needs to be variable, to ensure that we are 8-byte aligned
-        messages: count!(parse_header_message, n) >> //total_number_of_header_messages as usize) >>
         (ObjectHeader {
             version,
             total_number_of_header_messages,
             object_reference_count,
             object_header_size,
-            messages,
         })
     )
 );
@@ -442,8 +358,8 @@ named!(parse_fill_value <header::DataStorageFillValue>,
 #[cfg_attr(rustfmt, rustfmt_skip)]
 named!(parse_data_layout <header::DataLayout>,
     do_parse!(
-        tag!([3u8]) >> // version 3, only implement version 3 because I'm lazy
-        tag!([1u8]) >> // layout class 1, contiguious storage
+        dbg!(tag!([3u8])) >> // version 3, only implement version 3 because I'm lazy
+        dbg!(tag!([1u8])) >> // layout class 1, contiguious storage
         data_address: call!(address, 8) >>
         size: call!(address, 8) >>
         take!(6) >> // TODO: pad to a multiple of 8 bytes
@@ -457,8 +373,8 @@ named!(parse_data_layout <header::DataLayout>,
 #[cfg_attr(rustfmt, rustfmt_skip)]
 named_args!(parse_attribute (message_size: u16) <header::Attribute>,
     do_parse!(
-        tag!([1]) >> // we only handle version 1
-        tag!([0]) >>
+        dbg!(tag!([1])) >> // we only handle version 1
+        dbg!(tag!([0])) >>
         name_size: le_u16 >>
         datatype_size: le_u16 >>
         dataspace_size: le_u16 >>
@@ -502,8 +418,8 @@ named!(parse_symbol_table_message <header::SymbolTable>,
 #[cfg_attr(rustfmt, rustfmt_skip)]
 named!(parse_object_modification_time <header::ObjectModificationTime>,
     do_parse!(
-        tag!([1]) >> // version 1 is the only one allowed by the standard
-        tag!(b"\0\0\0") >>
+        dbg!(tag!([1])) >> // version 1 is the only one allowed by the standard
+        dbg!(tag!(b"\0\0\0")) >>
         seconds: le_u32 >>
         (header::ObjectModificationTime {
             seconds_after_unix_epoch: seconds,
@@ -512,12 +428,12 @@ named!(parse_object_modification_time <header::ObjectModificationTime>,
 );
 
 #[cfg_attr(rustfmt, rustfmt_skip)]
-named!(parse_header_message <header::Message>,
+named!(pub parse_header_message <header::Message>,
     do_parse!(
         message_type: le_u16 >>
         message_size: le_u16 >>
         _flags: le_u8 >>
-        tag!(b"\0\0\0") >>
+        dbg!(tag!(b"\0\0\0")) >>
         message: switch!(value!(message_type),
             0x0 => value!(header::Message::Nil) |
             0x1 => map!(call!(parse_dataspace), header::Message::Dataspace) |
@@ -528,11 +444,7 @@ named!(parse_header_message <header::Message>,
             0x10 => map!(call!(parse_object_header_continuation), header::Message::ObjectHeaderContinuation) |
             0x11 => map!(call!(parse_symbol_table_message), header::Message::SymbolTable) |
             0x12 => map!(call!(parse_object_modification_time), header::Message::ObjectModificationTime) |
-            _ => value!(
-            header::Message::ObjectHeaderContinuation(header::ObjectHeaderContinuation{
-                offset: message_type as u64,
-                length: 0,
-            }))
+            _ => value!(header::Message::Nil)
         ) >>
         (message)
     )
