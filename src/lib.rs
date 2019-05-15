@@ -1,3 +1,8 @@
+//! A pure-Rust HDF5 library, built for speed
+//!
+//! This library does not intend to support all features of HDF5 either in the library or the
+//! specification.
+
 use std::collections::BTreeMap; // Currently use BTreeMap just to get sorted Debug output
 use std::path::Path;
 
@@ -5,41 +10,59 @@ mod error;
 mod parse;
 pub use error::Error;
 
+/// Convienence function for Hdf5File::open
 pub fn open<P: AsRef<Path>>(path: P) -> Result<Hdf5File, Error> {
     Hdf5File::open(path)
 }
 
+/// An opened HDF5 file
 pub struct Hdf5File {
     map: memmap::Mmap,
-    root_attributes: BTreeMap<String, Attribute>,
-    root_datasets: BTreeMap<String, Dataset>,
-    groups: BTreeMap<String, Group>,
+    root_group: Group,
 }
 
 impl std::fmt::Debug for Hdf5File {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         f.debug_struct("Hdf5File")
-            .field("attributes", &self.root_attributes)
-            .field("datasets", &self.root_datasets)
-            .field("groups", &self.groups)
+            .field("attributes", &self.root_group.attributes)
+            .field("datasets", &self.root_group.datasets)
+            .field("groups", &self.root_group.groups)
             .finish()
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct Group {
+#[derive(Debug)]
+struct Group {
     attributes: BTreeMap<String, Attribute>,
     datasets: BTreeMap<String, Dataset>,
     groups: BTreeMap<String, Group>,
 }
 
-#[derive(Clone)]
-pub struct Dataset {
+impl Group {
+    fn find_dataset(&self, dataset_path: &str) -> &Dataset {
+        let delim_index = dataset_path.find("/");
+        if let Some(i) = delim_index {
+            let (first, remaining) = dataset_path.split_at(i);
+            if let Some(d) = self.datasets.get(first) {
+                d
+            } else {
+                self.groups[first].find_dataset(&remaining[1..])
+            }
+        } else {
+            &self.datasets[dataset_path]
+        }
+    }
+}
+
+struct Dataset {
     dimensions: Vec<u64>,
     dtype: Hdf5Dtype,
     address: u64,
     size: u64,
 }
+
+#[derive(Debug)]
+struct Attribute {}
 
 impl std::fmt::Debug for Dataset {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -65,8 +88,17 @@ impl Dataset {
     }
 }
 
-pub trait Hdf5Type {
+/// Identifies Rust types that this library can produce from HDF5 types
+pub trait Hdf5Type: private::Sealed {
     fn dtype() -> Hdf5Dtype;
+}
+
+mod private {
+    pub trait Sealed {}
+    impl Sealed for f64 {}
+    impl Sealed for f32 {}
+    impl Sealed for i64 {}
+    impl Sealed for i32 {}
 }
 
 impl Hdf5Type for f64 {
@@ -93,6 +125,7 @@ impl Hdf5Type for i32 {
     }
 }
 
+#[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hdf5Dtype {
     F64,
@@ -113,19 +146,18 @@ impl Hdf5Dtype {
     }
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct Attribute {
-    name: String,
-}
-
 impl Hdf5File {
+    /// Open an HDF5 file
+    ///
+    /// This function memory-maps the file and initializes a number of internal data structures to
+    /// make access to data trivial.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
         let file = std::fs::File::open(path)?;
         let contents = unsafe { memmap::Mmap::map(&file)? };
         let superblock = parse::parse_superblock(&contents)?.1;
 
         use std::ops::Deref;
-        let root = parse_group(
+        let root_group = parse_group(
             contents.deref(),
             parse::header::SymbolTable {
                 btree_address: superblock.root_group_symbol_table_entry.address_of_btree,
@@ -137,23 +169,27 @@ impl Hdf5File {
 
         Ok(Hdf5File {
             map: contents,
-            groups: root.groups,
-            root_datasets: root.datasets,
-            root_attributes: root.attributes,
+            root_group,
         })
     }
 
-    pub fn view<T: Hdf5Type>(&self, name: &str) -> &[T] {
-        let dataset = self.root_datasets.get(name).unwrap();
+    /// Look up the provided path to a dataset, if one is found and its type correct, return a
+    /// slice of the underlying file mapping.
+    ///
+    /// Note that this discards any dimension information associated with the dataset.
+    ///
+    /// Panics if the given path doesn't lead to a datset or the type is incorrect.
+    pub fn view<T: Hdf5Type>(&self, dataset_path: &str) -> &[T] {
+        let dataset = self.root_group.find_dataset(dataset_path);
         if T::dtype() != dataset.dtype {
-            eprintln!(
+            panic!(
                 "Dataset {:?} is of type {:?}, not {:?}",
-                name,
+                dataset_path,
                 dataset.dtype,
                 T::dtype()
             );
-            panic!("invalid type passed to view");
         }
+
         unsafe {
             use std::ops::Deref;
             let data_start = self.map.deref().as_ptr().offset(dataset.address as isize) as *const T;

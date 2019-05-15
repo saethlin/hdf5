@@ -1,3 +1,4 @@
+/// All errors that this library can emit
 #[derive(Debug)]
 pub enum Error {
     Io(std::io::Error),
