@@ -10,9 +10,9 @@ mod error;
 mod parse;
 pub use error::Error;
 
-/// Convienence function for Hdf5File::open
-pub fn open<P: AsRef<Path>>(path: P) -> Result<Hdf5File, Error> {
-    Hdf5File::open(path)
+/// Convienence function for Hdf5File::read
+pub fn read<P: AsRef<Path>>(path: P) -> Result<Hdf5File, Error> {
+    Hdf5File::read(path)
 }
 
 /// An opened HDF5 file
@@ -151,7 +151,7 @@ impl Hdf5File {
     ///
     /// This function memory-maps the file and initializes a number of internal data structures to
     /// make access to data trivial.
-    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
+    pub fn read<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
         let file = std::fs::File::open(path)?;
         let contents = unsafe { memmap::Mmap::map(&file)? };
         let superblock = parse::parse_superblock(&contents)?.1;
