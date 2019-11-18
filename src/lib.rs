@@ -33,7 +33,7 @@ impl std::fmt::Debug for Hdf5File {
 
 #[derive(Debug)]
 struct Group {
-    attributes: BTreeMap<String, Attribute>,
+    attributes: BTreeMap<String, parse::header::Attribute>,
     datasets: BTreeMap<String, Dataset>,
     groups: BTreeMap<String, Group>,
 }
@@ -60,9 +60,6 @@ struct Dataset {
     address: u64,
     size: u64,
 }
-
-#[derive(Debug)]
-struct Attribute {}
 
 impl std::fmt::Debug for Dataset {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -136,11 +133,12 @@ pub enum Hdf5Dtype {
 
 impl Hdf5Dtype {
     fn from(raw: parse::header::DataType) -> Self {
-        match (raw.class, raw.size) {
-            (0, 8) => Hdf5Dtype::I64,
-            (0, 4) => Hdf5Dtype::I32,
-            (1, 8) => Hdf5Dtype::F64,
-            (1, 4) => Hdf5Dtype::F32,
+        use parse::header::DatatypeClass;
+        match (raw.class.clone(), raw.size.clone()) {
+            (DatatypeClass::FixedPoint, 4) => Hdf5Dtype::I32,
+            (DatatypeClass::FixedPoint, 8) => Hdf5Dtype::I64,
+            (DatatypeClass::FloatingPoint, 8) => Hdf5Dtype::F64,
+            (DatatypeClass::FloatingPoint, 4) => Hdf5Dtype::F32,
             _ => unimplemented!("dtype not supported yet {:#?}", raw),
         }
     }
@@ -154,7 +152,7 @@ impl Hdf5File {
     pub fn read<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
         let file = std::fs::File::open(path)?;
         let contents = unsafe { memmap::Mmap::map(&file)? };
-        let superblock = parse::parse_superblock(&contents)?.1;
+        let superblock = parse::parse_superblock(&contents).unwrap().1;
 
         use std::ops::Deref;
         let root_group = parse_group(
@@ -199,21 +197,24 @@ impl Hdf5File {
 }
 
 fn parse_group(contents: &[u8], symbol_table: parse::header::SymbolTable) -> Result<Group, Error> {
-    let node = parse::hdf5_node(&contents[symbol_table.btree_address as usize..], 8)?.1;
+    let node = parse::hdf5_node(&contents[symbol_table.btree_address as usize..], 8)
+        .unwrap()
+        .1;
 
     let name_heap =
-        parse::parse_local_heap(&contents[symbol_table.local_heap_address as usize..], 8, 8)?.1;
+        parse::parse_local_heap(&contents[symbol_table.local_heap_address as usize..], 8, 8)
+            .unwrap()
+            .1;
 
     let mut datasets = BTreeMap::new();
     let mut groups = BTreeMap::new();
-    let attributes = BTreeMap::new();
+    let mut attributes = BTreeMap::new();
 
     for group_entry in node.entries {
-        let table = parse::parse_symbol_table(
-            &contents[group_entry.pointer_to_symbol_table as usize..],
-            8,
-        )?
-        .1;
+        let table =
+            parse::parse_symbol_table(&contents[group_entry.pointer_to_symbol_table as usize..], 8)
+                .unwrap()
+                .1;
 
         for object in &table.entries {
             let name = &contents
@@ -226,11 +227,12 @@ fn parse_group(contents: &[u8], symbol_table: parse::header::SymbolTable) -> Res
             use parse::header::Message;
             use parse::header::ObjectHeaderContinuation;
             let (mut remaining, object_header) =
-                parse::parse_object_header(&contents[object.object_header_address as usize..])?;
+                parse::parse_object_header(&contents[object.object_header_address as usize..])
+                    .unwrap();
             let mut messages = Vec::new();
 
             for _ in 0..object_header.total_number_of_header_messages {
-                let (rem, message) = parse::parse_header_message(remaining)?;
+                let (rem, message) = parse::parse_header_message(remaining).unwrap();
                 if let Message::ObjectHeaderContinuation(ObjectHeaderContinuation {
                     offset, ..
                 }) = message
@@ -245,6 +247,7 @@ fn parse_group(contents: &[u8], symbol_table: parse::header::SymbolTable) -> Res
                 if let Message::Attribute(_) = message {
                     break;
                 }
+                println!("{:?}", message);
             }
 
             // Datasets have a data layout, data storage, datatype, and dataspace
@@ -252,7 +255,6 @@ fn parse_group(contents: &[u8], symbol_table: parse::header::SymbolTable) -> Res
             let mut fillvalue = None;
             let mut dtype = None;
             let mut dspace = None;
-            let mut attributes = Vec::new();
             let mut symbol_table = None;
 
             for message in messages {
@@ -261,7 +263,9 @@ fn parse_group(contents: &[u8], symbol_table: parse::header::SymbolTable) -> Res
                     Message::DataStorageFillValue(m) => fillvalue = Some(m),
                     Message::DataType(m) => dtype = Some(m),
                     Message::Dataspace(m) => dspace = Some(m),
-                    Message::Attribute(m) => attributes.push(m),
+                    Message::Attribute(m) => {
+                        attributes.insert(m.name.clone(), m);
+                    }
                     Message::SymbolTable(m) => symbol_table = Some(m),
                     _ => {}
                 }

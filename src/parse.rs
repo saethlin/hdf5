@@ -1,5 +1,6 @@
-use nom::dbg;
-use nom::*;
+use nom::{call, cond, count, dbg, do_parse, named, named_args, tag, take};
+
+use nom::number::streaming::{le_u16, le_u24, le_u32, le_u64, le_u8};
 
 #[derive(Debug)]
 pub struct Hdf5Superblock {
@@ -19,9 +20,9 @@ pub struct Hdf5Superblock {
     pub root_group_symbol_table_entry: SymbolTableEntry,
 }
 
-named_args!(address (len: u8) <u64>,
-   map!(take!(len), |x| le_u64(x).unwrap().1)
-);
+fn address(input: &[u8], len: u8) -> nom::IResult<&[u8], u64> {
+    nom::combinator::map_parser(nom::bytes::streaming::take(len), le_u64)(input)
+}
 
 named!(pub parse_superblock<&[u8], Hdf5Superblock>,
     do_parse!(
@@ -222,9 +223,28 @@ pub mod header {
     }
 
     #[derive(Debug, Clone)]
+    pub enum DatatypeClass {
+        FixedPoint,
+        FloatingPoint,
+        Time,
+        String,
+        Bitfield,
+        Opaque,
+        Compound,
+        Reference,
+        Enumerated,
+        VariableLength {
+            ty: u8,
+            padding: u8,
+            character_set: u8,
+        },
+        Array,
+    }
+
+    #[derive(Debug, Clone)]
     pub struct DataType {
         pub version: u8,
-        pub class: u8,
+        pub class: DatatypeClass,
         pub class_bitfields: u32,
         pub size: u32,
         pub properties: Vec<u8>,
@@ -300,6 +320,7 @@ pub mod header {
     }
 }
 
+/*
 #[cfg_attr(rustfmt, rustfmt_skip)]
 named_args!(parse_datatype (message_size: u16) <header::DataType>,
     do_parse!(
@@ -316,24 +337,64 @@ named_args!(parse_datatype (message_size: u16) <header::DataType>,
         })
     )
 );
+*/
 
-#[cfg_attr(rustfmt, rustfmt_skip)]
-named!(parse_dataspace <header::Dataspace>,
-    do_parse!(
-        version: le_u8 >>
-        dimensionality: le_u8 >>
-        flags: le_u8 >>
-        take!(5) >> // not reqired to be zero, oddly
-        dimensions: count!(apply!(address, 8), dimensionality as usize) >>
-        _max_dimensions: cond!(flags == 1, count!(apply!(address, 8), dimensionality as usize)) >>
-        (header::Dataspace {
+fn parse_datatype(input: &[u8], message_size: u16) -> nom::IResult<&[u8], header::DataType> {
+    use header::DatatypeClass::*;
+    let (input, class_and_version) = le_u8(input)?;
+    let (input, class_bitfields) = le_u24(input)?;
+    let (input, size) = le_u32(input)?;
+    let (input, properties) = nom::multi::count(le_u8, message_size as usize - 8)(input)?;
+
+    let version = class_and_version >> 4;
+    let class = match class_and_version & 0b0000_1111 {
+        0 => FixedPoint,
+        1 => FloatingPoint,
+        2 => Time,
+        3 => header::DatatypeClass::String,
+        4 => Bitfield,
+        5 => Opaque,
+        6 => Compound,
+        7 => Reference,
+        8 => Enumerated,
+        9 => VariableLength {
+            ty: (class_bitfields & 0b111) as u8,
+            padding: (class_bitfields >> 3 & 0b111) as u8,
+            character_set: (class_bitfields >> 8 & 0b111) as u8,
+        },
+        10 => Array,
+        _ => panic!("unknown dtype"),
+    };
+
+    Ok((
+        input,
+        header::DataType {
+            version,
+            class,
+            class_bitfields,
+            size,
+            properties,
+        },
+    ))
+}
+
+fn parse_dataspace(input: &[u8]) -> nom::IResult<&[u8], header::Dataspace> {
+    let (input, (version, dimensionality, flags)) =
+        nom::sequence::tuple((le_u8, le_u8, le_u8))(input)?;
+    let (input, _) = nom::bytes::streaming::take(5usize)(input)?;
+    // address
+    let (input, dimensions) = nom::multi::count(le_u64, dimensionality as usize)(input)?;
+
+    Ok((
+        input,
+        header::Dataspace {
             version,
             dimensionality,
             flags,
             dimensions,
-        })
-    )
-);
+        },
+    ))
+}
 
 #[cfg_attr(rustfmt, rustfmt_skip)]
 named!(parse_fill_value <header::DataStorageFillValue>,
@@ -370,6 +431,44 @@ named!(parse_data_layout <header::DataLayout>,
     )
 );
 
+fn parse_attribute(input: &[u8], message_size: u16) -> nom::IResult<&[u8], header::Attribute> {
+    let (input, _) = nom::bytes::streaming::tag([1])(input)?;
+    let (input, _) = nom::bytes::streaming::tag([0])(input)?;
+    let (input, name_size) = le_u16(input)?;
+    let (input, datatype_size) = le_u16(input)?;
+    let (input, dataspace_size) = le_u16(input)?;
+    let (input, name) = nom::bytes::streaming::take(pad8(name_size))(input)?;
+    let (input, datatype) = parse_datatype(input, datatype_size)?;
+    let (input, dataspace) = parse_dataspace(input)?;
+    let (input, data) = nom::bytes::streaming::take(
+        message_size as usize - (8 + pad8(name_size) + pad8(datatype_size) + pad8(dataspace_size)),
+    )(input)?;
+    let name = name
+        .iter()
+        .take_while(|b| **b > 0)
+        .map(|b| *b as char)
+        .collect();
+    // If this is a string, jump to the global heap and read the contents there
+    if let header::DataType {
+        version: 1,
+        class: header::DatatypeClass::VariableLength { .. },
+        ..
+    } = datatype
+    {
+        eprintln!("{}", le_u64(&data)?.1);
+    }
+    Ok((
+        input,
+        header::Attribute {
+            name,
+            datatype,
+            dataspace,
+            data: data.to_vec(),
+        },
+    ))
+}
+
+/*
 #[cfg_attr(rustfmt, rustfmt_skip)]
 named_args!(parse_attribute (message_size: u16) <header::Attribute>,
     do_parse!(
@@ -390,6 +489,7 @@ named_args!(parse_attribute (message_size: u16) <header::Attribute>,
         })
     )
 );
+*/
 
 #[cfg_attr(rustfmt, rustfmt_skip)]
 named!(parse_object_header_continuation <header::ObjectHeaderContinuation>,
@@ -427,6 +527,38 @@ named!(parse_object_modification_time <header::ObjectModificationTime>,
     )
 );
 
+pub fn parse_header_message(input: &[u8]) -> nom::IResult<&[u8], header::Message> {
+    let (input, message_type) = le_u16(input)?;
+    let (input, message_size) = le_u16(input)?;
+    let (input, _flags) = le_u8(input)?;
+    let (input, _) = nom::bytes::streaming::tag(b"\0\0\0")(input)?;
+    use header::Message;
+    use nom::combinator::map;
+    eprintln!("{}", message_type);
+    match message_type {
+        0x0 => Ok((input, header::Message::Nil)),
+        0x1 => map(parse_dataspace, Message::Dataspace)(input),
+        0x3 => parse_datatype(input, message_size).map(|(i, dtype)| (i, Message::DataType(dtype))),
+        0x5 => map(parse_fill_value, Message::DataStorageFillValue)(input),
+        0x8 => map(parse_data_layout, Message::DataLayout)(input),
+        0xC => parse_attribute(input, message_size).map(|(i, attr)| (i, Message::Attribute(attr))),
+        0x10 => map(
+            parse_object_header_continuation,
+            Message::ObjectHeaderContinuation,
+        )(input),
+        0x11 => map(parse_symbol_table_message, Message::SymbolTable)(input),
+        0x12 => map(
+            parse_object_modification_time,
+            Message::ObjectModificationTime,
+        )(input),
+        _ => {
+            eprintln!("unknown header message {}", message_type);
+            Ok((input, header::Message::Nil))
+        }
+    }
+}
+
+/*
 #[cfg_attr(rustfmt, rustfmt_skip)]
 named!(pub parse_header_message <header::Message>,
     do_parse!(
@@ -449,6 +581,7 @@ named!(pub parse_header_message <header::Message>,
         (message)
     )
 );
+*/
 
 fn pad8<T>(t: T) -> usize
 where
