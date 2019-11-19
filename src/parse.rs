@@ -1,6 +1,8 @@
 use nom::{call, cond, count, dbg, do_parse, named, named_args, tag, take};
 
+use nom::bytes::streaming::{tag, take};
 use nom::number::streaming::{le_u16, le_u24, le_u32, le_u64, le_u8};
+use nom::IResult;
 
 #[derive(Debug)]
 pub struct Hdf5Superblock {
@@ -20,30 +22,32 @@ pub struct Hdf5Superblock {
     pub root_group_symbol_table_entry: SymbolTableEntry,
 }
 
-fn address(input: &[u8], len: u8) -> nom::IResult<&[u8], u64> {
-    nom::combinator::map_parser(nom::bytes::streaming::take(len), le_u64)(input)
+fn address<'a>(len: u8) -> impl Fn(&'a [u8]) -> IResult<&'a [u8], u64> {
+    nom::combinator::map_parser(take(len), le_u64)
 }
 
-named!(pub parse_superblock<&[u8], Hdf5Superblock>,
-    do_parse!(
-        tag!(b"\x89\x48\x44\x46\x0d\x0a\x1a\x0a") >>
-        superblock_version: le_u8 >>
-        free_space_storage_version: le_u8 >>
-        root_group_symbol_table_entry_version: le_u8 >>
-        tag!(b"\0") >>
-        shared_header_message_format_version: le_u8 >>
-        offset_size: le_u8 >>
-        length_size: le_u8 >>
-        tag!(b"\0") >>
-        group_leaf_node_k: le_u16 >>
-        group_internal_node_k: le_u16 >>
-        file_consistency_flags: le_u32 >>
-        base_address: call!(address, offset_size) >>
-        address_of_file_free_space_info: call!(address, offset_size) >>
-        end_of_file_address: call!(address, offset_size) >>
-        driver_information_block_address: call!(address, offset_size) >>
-        root_group_symbol_table_entry: call!(parse_symbol_table_entry, offset_size) >>
-        (Hdf5Superblock {
+pub fn parse_superblock(input: &[u8]) -> IResult<&[u8], Hdf5Superblock> {
+    let (input, _) = tag(b"\x89\x48\x44\x46\x0d\x0a\x1a\x0a")(input)?;
+    let (input, superblock_version) = le_u8(input)?;
+    let (input, free_space_storage_version) = le_u8(input)?;
+    let (input, root_group_symbol_table_entry_version) = le_u8(input)?;
+    let (input, _) = tag([0])(input)?;
+    let (input, shared_header_message_format_version) = le_u8(input)?;
+    let (input, offset_size) = le_u8(input)?;
+    let (input, length_size) = le_u8(input)?;
+    let (input, _) = tag([0])(input)?;
+    let (input, group_leaf_node_k) = le_u16(input)?;
+    let (input, group_internal_node_k) = le_u16(input)?;
+    let (input, file_consistency_flags) = le_u32(input)?;
+    let (input, base_address) = address(offset_size)(input)?;
+    let (input, address_of_file_free_space_info) = address(offset_size)(input)?;
+    let (input, end_of_file_address) = address(offset_size)(input)?;
+    let (input, driver_information_block_address) = address(offset_size)(input)?;
+    let (input, root_group_symbol_table_entry) = symbol_table_entry(input, offset_size)?;
+
+    Ok((
+        input,
+        Hdf5Superblock {
             superblock_version,
             free_space_storage_version,
             root_group_symbol_table_entry_version,
@@ -58,9 +62,9 @@ named!(pub parse_superblock<&[u8], Hdf5Superblock>,
             end_of_file_address,
             driver_information_block_address,
             root_group_symbol_table_entry,
-        })
-    )
-);
+        },
+    ))
+}
 
 #[derive(Debug)]
 pub struct SymbolTable {
@@ -68,19 +72,17 @@ pub struct SymbolTable {
     pub entries: Vec<SymbolTableEntry>,
 }
 
-named_args!(pub parse_symbol_table (offset_size: u8) <SymbolTable>,
-    do_parse!(
-        tag!(b"SNOD") >>
-        version: le_u8 >>
-        tag!(b"\0") >>
-        number_of_symbols: le_u16 >>
-        entries: count!(call!(parse_symbol_table_entry, offset_size), number_of_symbols as usize) >>
-        (SymbolTable {
-            version,
-            entries,
-        })
-    )
-);
+pub fn parse_symbol_table(input: &[u8], offset_size: u8) -> IResult<&[u8], SymbolTable> {
+    let (input, _) = tag(b"SNOD")(input)?;
+    let (input, version) = le_u8(input)?;
+    let (input, _) = tag([0])(input)?;
+    let (input, number_of_symbols) = le_u16(input)?;
+    let (input, entries) = nom::multi::count(
+        |i| symbol_table_entry(i, offset_size),
+        number_of_symbols as usize,
+    )(input)?;
+    Ok((input, SymbolTable { version, entries }))
+}
 
 #[derive(Debug)]
 pub struct SymbolTableEntry {
@@ -91,23 +93,37 @@ pub struct SymbolTableEntry {
     pub address_of_name_heap: u64,
 }
 
-named_args!(pub parse_symbol_table_entry (offset_size: u8) <SymbolTableEntry>,
-    do_parse!(
-        link_name_offset: call!(address, offset_size) >>
-        object_header_address: call!(address, offset_size) >>
-        cache_type: le_u32 >>
-        tag!(b"\0\0\0\0") >>
-        address_of_btree: call!(address, offset_size) >>
-        address_of_name_heap: call!(address, offset_size) >>
-        (SymbolTableEntry {
+pub fn symbol_table_entry(input: &[u8], offset_size: u8) -> IResult<&[u8], SymbolTableEntry> {
+    let (
+        input,
+        (
+            link_name_offset,
+            object_header_address,
+            cache_type,
+            _,
+            address_of_btree,
+            address_of_name_heap,
+        ),
+    ) = nom::sequence::tuple((
+        address(offset_size),
+        address(offset_size),
+        le_u32,
+        tag([0000]),
+        address(offset_size),
+        address(offset_size),
+    ))(input)?;
+
+    Ok((
+        input,
+        SymbolTableEntry {
             link_name_offset,
             object_header_address,
             cache_type,
             address_of_btree,
             address_of_name_heap,
-        })
-    )
-);
+        },
+    ))
+}
 
 #[derive(Debug, Clone)]
 pub struct GroupEntry {
@@ -144,6 +160,25 @@ named_args!(pub hdf5_node (offset_size: u8) <GroupNode>,
         (node)
     )
 );
+
+pub fn group_node(input: &[u8], offset_size: u8) -> IResult<&[u8], GroupNode> {
+    let (input, node_level) = le_u8(input)?;
+    let (input, entries_used) = le_u16(input)?;
+    let (input, address_of_left_sibling) = address(offset_size)(input)?;
+    let (input, address_of_right_sibling) = address(offset_size)(input)?;
+    let (input, entries) = nom::multi::count(parse_group_entry, entries_used as usize)(input)?;
+
+    Ok((
+        input,
+        GroupNode {
+            node_level,
+            entries_used,
+            address_of_left_sibling,
+            address_of_right_sibling,
+            entries,
+        },
+    ))
+}
 
 named_args!(parse_group_node (offset_size: u8) <GroupNode>,
     do_parse!(
@@ -320,26 +355,7 @@ pub mod header {
     }
 }
 
-/*
-#[cfg_attr(rustfmt, rustfmt_skip)]
-named_args!(parse_datatype (message_size: u16) <header::DataType>,
-    do_parse!(
-        class_and_version: le_u8 >>
-        class_bitfields: le_u24 >>
-        size: le_u32 >>
-        properties: count!(le_u8, message_size as usize - 8) >>
-        (header::DataType {
-            version: class_and_version >> 4,
-            class: class_and_version & 0b00001111,
-            class_bitfields,
-            size,
-            properties,
-        })
-    )
-);
-*/
-
-fn parse_datatype(input: &[u8], message_size: u16) -> nom::IResult<&[u8], header::DataType> {
+fn parse_datatype(input: &[u8], message_size: u16) -> IResult<&[u8], header::DataType> {
     use header::DatatypeClass::*;
     let (input, class_and_version) = le_u8(input)?;
     let (input, class_bitfields) = le_u24(input)?;
@@ -378,7 +394,7 @@ fn parse_datatype(input: &[u8], message_size: u16) -> nom::IResult<&[u8], header
     ))
 }
 
-fn parse_dataspace(input: &[u8]) -> nom::IResult<&[u8], header::Dataspace> {
+fn parse_dataspace(input: &[u8]) -> IResult<&[u8], header::Dataspace> {
     let (input, (version, dimensionality, flags)) =
         nom::sequence::tuple((le_u8, le_u8, le_u8))(input)?;
     let (input, _) = nom::bytes::streaming::take(5usize)(input)?;
@@ -431,9 +447,9 @@ named!(parse_data_layout <header::DataLayout>,
     )
 );
 
-fn parse_attribute(input: &[u8], message_size: u16) -> nom::IResult<&[u8], header::Attribute> {
-    let (input, _) = nom::bytes::streaming::tag([1])(input)?;
-    let (input, _) = nom::bytes::streaming::tag([0])(input)?;
+fn parse_attribute(input: &[u8], message_size: u16) -> IResult<&[u8], header::Attribute> {
+    let (input, _) = tag([1])(input)?;
+    let (input, _) = tag([0])(input)?;
     let (input, name_size) = le_u16(input)?;
     let (input, datatype_size) = le_u16(input)?;
     let (input, dataspace_size) = le_u16(input)?;
@@ -467,29 +483,6 @@ fn parse_attribute(input: &[u8], message_size: u16) -> nom::IResult<&[u8], heade
         },
     ))
 }
-
-/*
-#[cfg_attr(rustfmt, rustfmt_skip)]
-named_args!(parse_attribute (message_size: u16) <header::Attribute>,
-    do_parse!(
-        dbg!(tag!([1])) >> // we only handle version 1
-        dbg!(tag!([0])) >>
-        name_size: le_u16 >>
-        datatype_size: le_u16 >>
-        dataspace_size: le_u16 >>
-        name: take!(pad8(name_size)) >>
-        datatype: call!(parse_datatype, datatype_size) >>
-        dataspace: parse_dataspace >>
-        data: take!(message_size as usize - (8 + pad8(name_size) + pad8(datatype_size) + pad8(dataspace_size))) >>
-        (header::Attribute {
-            name: name.iter().take_while(|b| **b > 0).map(|b| *b as char).collect::<String>(),
-            datatype,
-            dataspace,
-            data: data.to_vec(),
-        })
-    )
-);
-*/
 
 #[cfg_attr(rustfmt, rustfmt_skip)]
 named!(parse_object_header_continuation <header::ObjectHeaderContinuation>,
@@ -527,11 +520,11 @@ named!(parse_object_modification_time <header::ObjectModificationTime>,
     )
 );
 
-pub fn parse_header_message(input: &[u8]) -> nom::IResult<&[u8], header::Message> {
+pub fn parse_header_message(input: &[u8]) -> IResult<&[u8], header::Message> {
     let (input, message_type) = le_u16(input)?;
     let (input, message_size) = le_u16(input)?;
     let (input, _flags) = le_u8(input)?;
-    let (input, _) = nom::bytes::streaming::tag(b"\0\0\0")(input)?;
+    let (input, _) = tag([0, 0, 0])(input)?;
     use header::Message;
     use nom::combinator::map;
     eprintln!("{}", message_type);
@@ -557,31 +550,6 @@ pub fn parse_header_message(input: &[u8]) -> nom::IResult<&[u8], header::Message
         }
     }
 }
-
-/*
-#[cfg_attr(rustfmt, rustfmt_skip)]
-named!(pub parse_header_message <header::Message>,
-    do_parse!(
-        message_type: le_u16 >>
-        message_size: le_u16 >>
-        _flags: le_u8 >>
-        dbg!(tag!(b"\0\0\0")) >>
-        message: switch!(value!(message_type),
-            0x0 => value!(header::Message::Nil) |
-            0x1 => map!(call!(parse_dataspace), header::Message::Dataspace) |
-            0x3 => map!(call!(parse_datatype, message_size), header::Message::DataType) |
-            0x5 => map!(call!(parse_fill_value), header::Message::DataStorageFillValue) |
-            0x8 => map!(call!(parse_data_layout), header::Message::DataLayout) |
-            0xC => map!(call!(parse_attribute, message_size), header::Message::Attribute) |
-            0x10 => map!(call!(parse_object_header_continuation), header::Message::ObjectHeaderContinuation) |
-            0x11 => map!(call!(parse_symbol_table_message), header::Message::SymbolTable) |
-            0x12 => map!(call!(parse_object_modification_time), header::Message::ObjectModificationTime) |
-            _ => value!(header::Message::Nil)
-        ) >>
-        (message)
-    )
-);
-*/
 
 fn pad8<T>(t: T) -> usize
 where
