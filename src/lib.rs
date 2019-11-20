@@ -152,7 +152,7 @@ impl Hdf5File {
     pub fn read<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
         let file = std::fs::File::open(path)?;
         let contents = unsafe { memmap::Mmap::map(&file)? };
-        let superblock = parse::parse_superblock(&contents).unwrap().1;
+        let superblock = parse::superblock(&contents).unwrap().1;
 
         use std::ops::Deref;
         let root_group = parse_group(
@@ -201,10 +201,9 @@ fn parse_group(contents: &[u8], symbol_table: parse::header::SymbolTable) -> Res
         .unwrap()
         .1;
 
-    let name_heap =
-        parse::parse_local_heap(&contents[symbol_table.local_heap_address as usize..], 8, 8)
-            .unwrap()
-            .1;
+    let name_heap = parse::local_heap(&contents[symbol_table.local_heap_address as usize..], 8, 8)
+        .unwrap()
+        .1;
 
     let mut datasets = BTreeMap::new();
     let mut groups = BTreeMap::new();
@@ -212,7 +211,7 @@ fn parse_group(contents: &[u8], symbol_table: parse::header::SymbolTable) -> Res
 
     for group_entry in node.entries {
         let table =
-            parse::parse_symbol_table(&contents[group_entry.pointer_to_symbol_table as usize..], 8)
+            parse::symbol_table(&contents[group_entry.pointer_to_symbol_table as usize..], 8)
                 .unwrap()
                 .1;
 
@@ -227,12 +226,11 @@ fn parse_group(contents: &[u8], symbol_table: parse::header::SymbolTable) -> Res
             use parse::header::Message;
             use parse::header::ObjectHeaderContinuation;
             let (mut remaining, object_header) =
-                parse::parse_object_header(&contents[object.object_header_address as usize..])
-                    .unwrap();
+                parse::object_header(&contents[object.object_header_address as usize..]).unwrap();
             let mut messages = Vec::new();
 
             for _ in 0..object_header.total_number_of_header_messages {
-                let (rem, message) = parse::parse_header_message(remaining).unwrap();
+                let (rem, message) = parse::header_message(remaining).unwrap();
                 if let Message::ObjectHeaderContinuation(ObjectHeaderContinuation {
                     offset, ..
                 }) = message
@@ -247,7 +245,6 @@ fn parse_group(contents: &[u8], symbol_table: parse::header::SymbolTable) -> Res
                 if let Message::Attribute(_) = message {
                     break;
                 }
-                println!("{:?}", message);
             }
 
             // Datasets have a data layout, data storage, datatype, and dataspace
