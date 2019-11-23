@@ -1,5 +1,3 @@
-use nom::{call, cond, count, dbg, do_parse, named, named_args, tag, take};
-
 use nom::bytes::streaming::{tag, take};
 use nom::multi::count;
 use nom::number::streaming::{le_u16, le_u24, le_u32, le_u64, le_u8};
@@ -132,17 +130,17 @@ pub struct GroupEntry {
     pub pointer_to_symbol_table: u64,
 }
 
-#[cfg_attr(rustfmt, rustfmt_skip)]
-named!(pub group_entry<GroupEntry>,
-    do_parse!(
-        byte_offset_into_local_heap: le_u64 >>
-        pointer_to_symbol_table: le_u64 >>
-        (GroupEntry {
+pub fn group_entry(input: &[u8]) -> IResult<&[u8], GroupEntry> {
+    let (input, byte_offset_into_local_heap) = le_u64(input)?;
+    let (input, pointer_to_symbol_table) = le_u64(input)?;
+    Ok((
+        input,
+        GroupEntry {
             byte_offset_into_local_heap,
             pointer_to_symbol_table,
-        })
-    )
-);
+        },
+    ))
+}
 
 #[derive(Debug)]
 pub struct GroupNode {
@@ -153,14 +151,11 @@ pub struct GroupNode {
     pub entries: Vec<GroupEntry>,
 }
 
-named_args!(pub hdf5_node (offset_size: u8) <GroupNode>,
-    do_parse!(
-        tag!(b"TREE") >>
-        tag!([0]) >> // We only support group nodes
-        node: call!(group_node, offset_size) >>
-        (node)
-    )
-);
+pub fn hdf5_node(input: &[u8], offset_size: u8) -> IResult<&[u8], GroupNode> {
+    let (input, _) = tag(b"TREE")(input)?;
+    let (input, _) = tag([0])(input)?; // We only support group nodes
+    group_node(input, offset_size)
+}
 
 pub fn group_node(input: &[u8], offset_size: u8) -> IResult<&[u8], GroupNode> {
     let (input, node_level) = le_u8(input)?;
@@ -216,28 +211,28 @@ pub struct ObjectHeader {
     pub object_header_size: u32,
 }
 
-#[cfg_attr(rustfmt, rustfmt_skip)]
-named!(pub object_header <ObjectHeader>,
-    do_parse!(
-        version: le_u8 >>
-        dbg!(tag!(b"\0")) >>
-        total_number_of_header_messages: le_u16 >>
-        object_reference_count: le_u32 >>
-        object_header_size: le_u32 >>
-        take!(4) >> // This needs to be variable, to ensure that we are 8-byte aligned
-        (ObjectHeader {
+pub fn object_header(input: &[u8]) -> IResult<&[u8], ObjectHeader> {
+    let (input, version) = le_u8(input)?;
+    let (input, _) = tag([0])(input)?;
+    let (input, total_number_of_header_messages) = le_u16(input)?;
+    let (input, object_reference_count) = le_u32(input)?;
+    let (input, object_header_size) = le_u32(input)?;
+    // Pad to 8-byte alignment?
+    let (input, _) = take(4usize)(input)?;
+    Ok((
+        input,
+        ObjectHeader {
             version,
             total_number_of_header_messages,
             object_reference_count,
             object_header_size,
-        })
-    )
-);
+        },
+    ))
+}
 
 pub mod header {
     #[derive(Debug, Clone)]
     pub struct Dataspace {
-        pub version: u8,
         pub dimensionality: u8,
         pub flags: u8,
         pub dimensions: Vec<u64>,
@@ -273,12 +268,11 @@ pub mod header {
 
     #[derive(Debug, Clone)]
     pub struct DataStorageFillValue {
-        pub version: u8,
         pub space_allocation_time: u8,
         pub fill_value_write_time: u8,
         pub fill_value_defined: u8,
-        pub size: Option<u32>,
-        pub fill_value: Option<Vec<u8>>,
+        pub size: u32,
+        pub fill_value: Vec<u8>,
     }
 
     #[derive(Debug, Clone)]
@@ -381,16 +375,16 @@ fn datatype(input: &[u8], message_size: u16) -> IResult<&[u8], header::DataType>
 }
 
 fn dataspace(input: &[u8]) -> IResult<&[u8], header::Dataspace> {
-    let (input, (version, dimensionality, flags)) =
-        nom::sequence::tuple((le_u8, le_u8, le_u8))(input)?;
+    let (input, _) = tag([1])(input)?;
+    let (input, dimensionality) = le_u8(input)?;
+    let (input, flags) = le_u8(input)?;
     let (input, _) = nom::bytes::streaming::take(5usize)(input)?;
     // address
-    let (input, dimensions) = count(le_u64, dimensionality as usize)(input)?;
+    let (input, dimensions) = count(le_u64, 2 * dimensionality as usize)(input)?;
 
     Ok((
         input,
         header::Dataspace {
-            version,
             dimensionality,
             flags,
             dimensions,
@@ -398,25 +392,36 @@ fn dataspace(input: &[u8]) -> IResult<&[u8], header::Dataspace> {
     ))
 }
 
-#[cfg_attr(rustfmt, rustfmt_skip)]
-named!(fill_value <header::DataStorageFillValue>,
-    do_parse!(
-        version: le_u8 >>
-        space_allocation_time: le_u8 >>
-        fill_value_write_time: le_u8 >>
-        fill_value_defined: le_u8 >>
-        size: cond!(!(version > 1 && fill_value_defined == 0), le_u32) >>
-        fill_value: cond!(size.is_some(), count!(le_u8, size.unwrap() as usize)) >>
-        (header::DataStorageFillValue {
-            version,
-            space_allocation_time,
-            fill_value_write_time,
-            fill_value_defined,
-            size,
-            fill_value,
-        })
-    )
-);
+pub fn fill_value(input: &[u8]) -> IResult<&[u8], header::DataStorageFillValue> {
+    let (input, version) = le_u8(input)?; // Only support version 1
+    if version == 2 {
+        let (input, space_allocation_time) = le_u8(input)?;
+        let (input, fill_value_write_time) = le_u8(input)?;
+        let (input, fill_value_defined) = le_u8(input)?;
+        let (input, size) = if fill_value_defined > 0 {
+            le_u32(input)?
+        } else {
+            (input, 0)
+        };
+        let (input, fill_value) = if fill_value_defined > 0 {
+            count(le_u8, size as usize)(input)?
+        } else {
+            (input, Vec::new())
+        };
+        Ok((
+            input,
+            header::DataStorageFillValue {
+                space_allocation_time,
+                fill_value_write_time,
+                fill_value_defined,
+                size,
+                fill_value,
+            },
+        ))
+    } else {
+        panic!("Unsupported DataStorageFillValue version {}", version);
+    }
+}
 
 pub fn data_layout(input: &[u8]) -> IResult<&[u8], header::DataLayout> {
     let (input, _) = tag([3, 1])(input)?;
@@ -439,26 +444,24 @@ fn attribute(input: &[u8], message_size: u16) -> IResult<&[u8], header::Attribut
     let (input, name_size) = le_u16(input)?;
     let (input, datatype_size) = le_u16(input)?;
     let (input, dataspace_size) = le_u16(input)?;
-    let (input, name) = nom::bytes::streaming::take(pad8(name_size))(input)?;
-    let (input, datatype) = datatype(input, datatype_size)?;
-    let (input, dataspace) = dataspace(input)?;
-    let (input, data) = nom::bytes::streaming::take(
+
+    let (_, name) = nom::bytes::streaming::take(name_size)(input)?;
+    let name = String::from_utf8(name.iter().take_while(|b| **b > 0).copied().collect()).unwrap();
+    let input = &input[pad8(name_size)..];
+
+    let (_, datatype) = datatype(input, datatype_size)?;
+    let input = &input[pad8(datatype_size)..];
+
+    let (_, dataspace) = dataspace(input)?;
+    let input = &input[pad8(dataspace_size)..];
+
+    let data_len =
+        message_size as usize - (8 + pad8(name_size) + pad8(datatype_size) + pad8(dataspace_size));
+    let (_, data) = nom::bytes::streaming::take(
         message_size as usize - (8 + pad8(name_size) + pad8(datatype_size) + pad8(dataspace_size)),
     )(input)?;
-    let name = name
-        .iter()
-        .take_while(|b| **b > 0)
-        .map(|b| *b as char)
-        .collect();
-    // If this is a string, jump to the global heap and read the contents there
-    if let header::DataType {
-        version: 1,
-        class: header::DatatypeClass::VariableLength { .. },
-        ..
-    } = datatype
-    {
-        //TODO: Read from the global heap
-    }
+    let input = &input[data_len..];
+
     Ok((
         input,
         header::Attribute {
@@ -490,17 +493,17 @@ pub fn symbol_table_message(input: &[u8]) -> IResult<&[u8], header::SymbolTable>
     ))
 }
 
-#[cfg_attr(rustfmt, rustfmt_skip)]
-named!(object_modification_time <header::ObjectModificationTime>,
-    do_parse!(
-        dbg!(tag!([1])) >> // version 1 is the only one allowed by the standard
-        dbg!(tag!(b"\0\0\0")) >>
-        seconds: le_u32 >>
-        (header::ObjectModificationTime {
+pub fn object_modification_time(input: &[u8]) -> IResult<&[u8], header::ObjectModificationTime> {
+    let (input, _) = tag([1])(input)?; // version 1 is the only allowed by the standard
+    let (input, _) = tag([0, 0, 0])(input)?; // padding
+    let (input, seconds) = le_u32(input)?;
+    Ok((
+        input,
+        header::ObjectModificationTime {
             seconds_after_unix_epoch: seconds,
-        })
-    )
-);
+        },
+    ))
+}
 
 pub fn header_message(input: &[u8]) -> IResult<&[u8], header::Message> {
     let (input, message_type) = le_u16(input)?;
@@ -523,8 +526,7 @@ pub fn header_message(input: &[u8]) -> IResult<&[u8], header::Message> {
         0x11 => map(symbol_table_message, Message::SymbolTable)(input),
         0x12 => map(object_modification_time, Message::ObjectModificationTime)(input),
         _ => {
-            eprintln!("unknown header message {}", message_type);
-            Ok((input, header::Message::Nil))
+            panic!("unknown header message {}", message_type);
         }
     }
 }

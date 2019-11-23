@@ -33,7 +33,7 @@ impl std::fmt::Debug for Hdf5File {
 
 #[derive(Debug)]
 struct Group {
-    attributes: BTreeMap<String, parse::header::Attribute>,
+    attributes: BTreeMap<String, Attribute>,
     datasets: BTreeMap<String, Dataset>,
     groups: BTreeMap<String, Group>,
 }
@@ -51,6 +51,39 @@ impl Group {
         } else {
             &self.datasets[dataset_path]
         }
+    }
+}
+
+struct Attribute {
+    dtype: Hdf5Dtype,
+    #[allow(dead_code)]
+    dimensions: Vec<u64>,
+    data: Vec<u8>,
+}
+
+impl Attribute {
+    fn from(parsed: parse::header::Attribute) -> Self {
+        Attribute {
+            dtype: Hdf5Dtype::from(parsed.datatype),
+            dimensions: parsed.dataspace.dimensions,
+            data: parsed.data,
+        }
+    }
+}
+
+impl std::fmt::Debug for Attribute {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let value: Box<dyn std::fmt::Debug> = match self.dtype {
+            Hdf5Dtype::I32 => Box::new(i32::from_bytes(&self.data)),
+            Hdf5Dtype::I64 => Box::new(i64::from_bytes(&self.data)),
+            Hdf5Dtype::F32 => Box::new(f32::from_bytes(&self.data)),
+            Hdf5Dtype::F64 => Box::new(f64::from_bytes(&self.data)),
+        };
+
+        f.debug_struct("Attribute")
+            .field("dtype", &self.dtype)
+            .field("value", &value)
+            .finish()
     }
 }
 
@@ -88,25 +121,24 @@ impl Dataset {
 /// Identifies Rust types that this library can produce from HDF5 types
 pub trait Hdf5Type: private::Sealed {
     fn dtype() -> Hdf5Dtype;
+    fn from_bytes(bytes: &[u8]) -> Self;
 }
 
 mod private {
     pub trait Sealed {}
-    impl Sealed for f64 {}
-    impl Sealed for f32 {}
-    impl Sealed for i64 {}
     impl Sealed for i32 {}
+    impl Sealed for i64 {}
+    impl Sealed for f32 {}
+    impl Sealed for f64 {}
 }
 
-impl Hdf5Type for f64 {
+impl Hdf5Type for i32 {
     fn dtype() -> Hdf5Dtype {
-        Hdf5Dtype::F64
+        Hdf5Dtype::I32
     }
-}
 
-impl Hdf5Type for f32 {
-    fn dtype() -> Hdf5Dtype {
-        Hdf5Dtype::F32
+    fn from_bytes(bytes: &[u8]) -> Self {
+        Self::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
     }
 }
 
@@ -114,11 +146,33 @@ impl Hdf5Type for i64 {
     fn dtype() -> Hdf5Dtype {
         Hdf5Dtype::I64
     }
+
+    fn from_bytes(bytes: &[u8]) -> Self {
+        Self::from_ne_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ])
+    }
 }
 
-impl Hdf5Type for i32 {
+impl Hdf5Type for f32 {
     fn dtype() -> Hdf5Dtype {
-        Hdf5Dtype::I32
+        Hdf5Dtype::F32
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Self {
+        Self::from_bits(u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+}
+
+impl Hdf5Type for f64 {
+    fn dtype() -> Hdf5Dtype {
+        Hdf5Dtype::F64
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Self {
+        Self::from_bits(u64::from_ne_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]))
     }
 }
 
@@ -154,8 +208,15 @@ impl Hdf5File {
         let contents = unsafe { memmap::Mmap::map(&file)? };
         let superblock = parse::superblock(&contents).unwrap().1;
 
+        let (mut remaining, object_header) = parse::object_header(
+            &contents[superblock
+                .root_group_symbol_table_entry
+                .object_header_address as usize..],
+        )
+        .unwrap();
+
         use std::ops::Deref;
-        let root_group = parse_group(
+        let mut root_group = parse_group(
             contents.deref(),
             parse::header::SymbolTable {
                 btree_address: superblock.root_group_symbol_table_entry.address_of_btree,
@@ -164,6 +225,35 @@ impl Hdf5File {
                     .address_of_name_heap,
             },
         )?;
+
+        use parse::header::Message;
+        use parse::header::ObjectHeaderContinuation;
+        let mut messages = Vec::new();
+        for _ in 0..object_header.total_number_of_header_messages {
+            let (rem, message) = match parse::header_message(remaining) {
+                Ok((rem, message)) => (rem, message),
+                Err(e) => match e {
+                    nom::Err::Incomplete(..) => panic!("incomplete"),
+                    nom::Err::Error((_, reason)) => panic!("{:?}", reason),
+                    nom::Err::Failure((_, reason)) => panic!("{:?}", reason),
+                },
+            };
+            match message {
+                Message::Attribute(m) => {
+                    root_group
+                        .attributes
+                        .insert(m.name.clone(), Attribute::from(m));
+                    remaining = rem;
+                }
+                Message::ObjectHeaderContinuation(ObjectHeaderContinuation { offset, .. }) => {
+                    remaining = &contents[offset as usize..];
+                }
+                _ => {
+                    messages.push(message.clone());
+                    remaining = rem;
+                }
+            }
+        }
 
         Ok(Hdf5File {
             map: contents,
@@ -193,6 +283,19 @@ impl Hdf5File {
             let data_start = self.map.deref().as_ptr().offset(dataset.address as isize) as *const T;
             std::slice::from_raw_parts(data_start, dataset.size as usize / std::mem::size_of::<T>())
         }
+    }
+
+    pub fn attr<T: Hdf5Type>(&self, attribute_path: &str) -> T {
+        let attribute = self.root_group.attributes.get(attribute_path).unwrap();
+        if T::dtype() != attribute.dtype {
+            panic!(
+                "Attribute {:?} is of type {:?}, not {:?}",
+                attribute_path,
+                attribute.dtype,
+                T::dtype()
+            );
+        }
+        T::from_bytes(&attribute.data)
     }
 }
 
@@ -240,11 +343,6 @@ fn parse_group(contents: &[u8], symbol_table: parse::header::SymbolTable) -> Res
                     messages.push(message.clone());
                     remaining = rem;
                 }
-                // Attribute parsing is broken, which throws off the parser as soon as it hits
-                // one
-                if let Message::Attribute(_) = message {
-                    break;
-                }
             }
 
             // Datasets have a data layout, data storage, datatype, and dataspace
@@ -261,7 +359,7 @@ fn parse_group(contents: &[u8], symbol_table: parse::header::SymbolTable) -> Res
                     Message::DataType(m) => dtype = Some(m),
                     Message::Dataspace(m) => dspace = Some(m),
                     Message::Attribute(m) => {
-                        attributes.insert(m.name.clone(), m);
+                        attributes.insert(m.name.clone(), Attribute::from(m));
                     }
                     Message::SymbolTable(m) => symbol_table = Some(m),
                     _ => {}
