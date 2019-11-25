@@ -16,19 +16,10 @@ pub fn read<P: AsRef<Path>>(path: P) -> Result<Hdf5File, Error> {
 }
 
 /// An opened HDF5 file
+#[derive(Debug)]
 pub struct Hdf5File {
     map: memmap::Mmap,
     root_group: Group,
-}
-
-impl std::fmt::Debug for Hdf5File {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        f.debug_struct("Hdf5File")
-            .field("attributes", &self.root_group.attributes)
-            .field("datasets", &self.root_group.datasets)
-            .field("groups", &self.root_group.groups)
-            .finish()
-    }
 }
 
 #[derive(Debug)]
@@ -54,6 +45,7 @@ impl Group {
     }
 }
 
+#[derive(Debug)]
 struct Attribute {
     dtype: Hdf5Dtype,
     #[allow(dead_code)]
@@ -71,19 +63,18 @@ impl Attribute {
     }
 }
 
-impl std::fmt::Debug for Attribute {
+impl std::fmt::Display for Attribute {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let value: Box<dyn std::fmt::Debug> = match self.dtype {
-            Hdf5Dtype::I32 => Box::new(i32::from_bytes(&self.data)),
-            Hdf5Dtype::I64 => Box::new(i64::from_bytes(&self.data)),
-            Hdf5Dtype::F32 => Box::new(f32::from_bytes(&self.data)),
-            Hdf5Dtype::F64 => Box::new(f64::from_bytes(&self.data)),
-        };
-
-        f.debug_struct("Attribute")
-            .field("dtype", &self.dtype)
-            .field("value", &value)
-            .finish()
+        match self.dtype {
+            Hdf5Dtype::I32 => write!(f, "{}", i32::from_bytes(&self.data)),
+            Hdf5Dtype::I64 => write!(f, "{}", i64::from_bytes(&self.data)),
+            Hdf5Dtype::F32 => write!(f, "{}", f32::from_bytes(&self.data)),
+            Hdf5Dtype::F64 => write!(f, "{}", f64::from_bytes(&self.data)),
+            Hdf5Dtype::String(s) => {
+                write!(f, "{:?}", String::from_utf8_lossy(&self.data[..s as usize]))
+            }
+            Hdf5Dtype::Bool => write!(f, "{}", self.data[0] > 0),
+        }
     }
 }
 
@@ -183,6 +174,8 @@ pub enum Hdf5Dtype {
     F32,
     I64,
     I32,
+    String(u32),
+    Bool,
 }
 
 impl Hdf5Dtype {
@@ -193,6 +186,8 @@ impl Hdf5Dtype {
             (DatatypeClass::FixedPoint, 8) => Hdf5Dtype::I64,
             (DatatypeClass::FloatingPoint, 8) => Hdf5Dtype::F64,
             (DatatypeClass::FloatingPoint, 4) => Hdf5Dtype::F32,
+            (DatatypeClass::String, s) => Hdf5Dtype::String(s),
+            (DatatypeClass::Enumerated, 1) => Hdf5Dtype::Bool,
             _ => unimplemented!("dtype not supported yet {:#?}", raw),
         }
     }
@@ -206,14 +201,13 @@ impl Hdf5File {
     pub fn read<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
         let file = std::fs::File::open(path)?;
         let contents = unsafe { memmap::Mmap::map(&file)? };
-        let superblock = parse::superblock(&contents).unwrap().1;
+        let superblock = parse::superblock(&contents)?.1;
 
         let (mut remaining, object_header) = parse::object_header(
             &contents[superblock
                 .root_group_symbol_table_entry
                 .object_header_address as usize..],
-        )
-        .unwrap();
+        )?;
 
         use std::ops::Deref;
         let mut root_group = parse_group(
@@ -230,14 +224,7 @@ impl Hdf5File {
         use parse::header::ObjectHeaderContinuation;
         let mut messages = Vec::new();
         for _ in 0..object_header.total_number_of_header_messages {
-            let (rem, message) = match parse::header_message(remaining) {
-                Ok((rem, message)) => (rem, message),
-                Err(e) => match e {
-                    nom::Err::Incomplete(..) => panic!("incomplete"),
-                    nom::Err::Error((_, reason)) => panic!("{:?}", reason),
-                    nom::Err::Failure((_, reason)) => panic!("{:?}", reason),
-                },
-            };
+            let (rem, message) = parse::header_message(remaining)?;
             match message {
                 Message::Attribute(m) => {
                     root_group
@@ -286,7 +273,11 @@ impl Hdf5File {
     }
 
     pub fn attr<T: Hdf5Type>(&self, attribute_path: &str) -> T {
-        let attribute = self.root_group.attributes.get(attribute_path).unwrap();
+        let attribute = self
+            .root_group
+            .attributes
+            .get(attribute_path)
+            .expect(&format!("attribute not found: {:?}", attribute_path));
         if T::dtype() != attribute.dtype {
             panic!(
                 "Attribute {:?} is of type {:?}, not {:?}",
@@ -300,13 +291,10 @@ impl Hdf5File {
 }
 
 fn parse_group(contents: &[u8], symbol_table: parse::header::SymbolTable) -> Result<Group, Error> {
-    let node = parse::hdf5_node(&contents[symbol_table.btree_address as usize..], 8)
-        .unwrap()
-        .1;
+    let node = parse::hdf5_node(&contents[symbol_table.btree_address as usize..], 8)?.1;
 
-    let name_heap = parse::local_heap(&contents[symbol_table.local_heap_address as usize..], 8, 8)
-        .unwrap()
-        .1;
+    let name_heap =
+        parse::local_heap(&contents[symbol_table.local_heap_address as usize..], 8, 8)?.1;
 
     let mut datasets = BTreeMap::new();
     let mut groups = BTreeMap::new();
@@ -314,9 +302,7 @@ fn parse_group(contents: &[u8], symbol_table: parse::header::SymbolTable) -> Res
 
     for group_entry in node.entries {
         let table =
-            parse::symbol_table(&contents[group_entry.pointer_to_symbol_table as usize..], 8)
-                .unwrap()
-                .1;
+            parse::symbol_table(&contents[group_entry.pointer_to_symbol_table as usize..], 8)?.1;
 
         for object in &table.entries {
             let name = &contents
@@ -329,11 +315,11 @@ fn parse_group(contents: &[u8], symbol_table: parse::header::SymbolTable) -> Res
             use parse::header::Message;
             use parse::header::ObjectHeaderContinuation;
             let (mut remaining, object_header) =
-                parse::object_header(&contents[object.object_header_address as usize..]).unwrap();
+                parse::object_header(&contents[object.object_header_address as usize..])?;
             let mut messages = Vec::new();
 
             for _ in 0..object_header.total_number_of_header_messages {
-                let (rem, message) = parse::header_message(remaining).unwrap();
+                let (rem, message) = parse::header_message(remaining)?;
                 if let Message::ObjectHeaderContinuation(ObjectHeaderContinuation {
                     offset, ..
                 }) = message
@@ -373,7 +359,7 @@ fn parse_group(contents: &[u8], symbol_table: parse::header::SymbolTable) -> Res
                 (None, None, None, None, Some(symbol_table)) => {
                     groups.insert(name.clone(), parse_group(contents, symbol_table)?);
                 }
-                _ => eprintln!("Unrecognized kind of HDF5 object found"),
+                _ => panic!("Found an HDF5 object that is not a dataset or a group"),
             }
         }
     }
