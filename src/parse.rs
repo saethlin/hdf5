@@ -1,5 +1,6 @@
 use nom::bytes::streaming::{tag, take};
 use nom::error::context;
+use nom::error::{make_error, ErrorKind};
 use nom::multi::count;
 use nom::number::streaming::{le_u16, le_u24, le_u32, le_u64, le_u8};
 
@@ -380,7 +381,7 @@ fn datatype(input: &[u8], message_size: u16) -> Result<header::DataType> {
                 character_set: (class_bitfields >> 8 & 0b111) as u8,
             },
             10 => Array,
-            _ => panic!("unknown dtype {}", raw_class),
+            _ => return Err(nom::Err::Failure(make_error(input, ErrorKind::Alt))),
         };
 
         Ok((
@@ -444,7 +445,7 @@ pub fn fill_value(input: &[u8]) -> Result<header::DataStorageFillValue> {
                 },
             ))
         } else {
-            panic!("Unsupported DataStorageFillValue version {}", version);
+            unimplemented!("Only supports fill value version 2");
         }
     })(input)
 }
@@ -570,7 +571,7 @@ pub fn header_message(input: &[u8]) -> Result<header::Message> {
             0x11 => map(symbol_table_message, Message::SymbolTable)(input),
             0x12 => map(object_modification_time, Message::ObjectModificationTime)(input),
             _ => {
-                panic!("unknown header message {}", message_type);
+                unimplemented!("unknown header message {}", message_type);
             }
         }
     })(input)

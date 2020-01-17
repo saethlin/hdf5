@@ -48,7 +48,6 @@ impl Group {
 #[derive(Debug)]
 struct Attribute {
     dtype: Hdf5Dtype,
-    #[allow(dead_code)]
     dimensions: Vec<u64>,
     data: Vec<u8>,
 }
