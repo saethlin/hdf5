@@ -6,13 +6,5 @@ license = "MIT/Apache-2.0"
 edition = "2018"
 
 [dependencies]
-<<<<<<< HEAD
 memmap = "0.7"
 nom = {version = "5.0", default-features = false, features = ["std"]}
-=======
-nom = {version = "5.0", default-features = false, features=["std"]}
-memmap = "0.7"
-
-[profile.dev]
-debug = 1
->>>>>>> ea6e6aa3c911b6e4861c6b19fd442e0b64d79851
