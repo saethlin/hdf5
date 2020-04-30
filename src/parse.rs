@@ -255,6 +255,7 @@ pub mod header {
         pub dimensionality: u8,
         pub flags: u8,
         pub dimensions: Vec<u64>,
+        pub max_dimensions: Option<Vec<u64>>,
     }
 
     #[derive(Debug, Clone)]
@@ -380,7 +381,7 @@ fn datatype(input: &[u8], message_size: u16) -> Result<header::DataType> {
                 character_set: (class_bitfields >> 8 & 0b111) as u8,
             },
             10 => Array,
-            _ => panic!("unknown dtype {}", raw_class),
+            _ => panic!("Invalid datatype class: {}", raw_class),
         };
 
         Ok((
@@ -401,9 +402,19 @@ fn dataspace(input: &[u8]) -> Result<header::Dataspace> {
         let (input, _) = tag([1])(input)?;
         let (input, dimensionality) = le_u8(input)?;
         let (input, flags) = le_u8(input)?;
-        let (input, _) = nom::bytes::streaming::take(5usize)(input)?;
-        // address
-        let (input, dimensions) = count(le_u64, 2 * dimensionality as usize)(input)?;
+        let (input, _ty) = le_u8(input)?;
+        // Eat the unused bytes in version 1
+        let (input, _) = nom::bytes::streaming::take(4usize)(input)?;
+        let (input, (dimensions, max_dimensions)) = if flags == 0 {
+            let (input, dimensions) = count(le_u64, dimensionality as usize)(input)?;
+            (input, (dimensions, None))
+        } else if flags == 1 {
+            let (input, dimensions) = count(le_u64, dimensionality as usize)(input)?;
+            let (input, max_dimensions) = count(le_u64, dimensionality as usize)(input)?;
+            (input, (dimensions, Some(max_dimensions)))
+        } else {
+            unimplemented!("Permutation indices are not supported");
+        };
 
         Ok((
             input,
@@ -411,6 +422,7 @@ fn dataspace(input: &[u8]) -> Result<header::Dataspace> {
                 dimensionality,
                 flags,
                 dimensions,
+                max_dimensions,
             },
         ))
     })(input)
@@ -444,7 +456,7 @@ pub fn fill_value(input: &[u8]) -> Result<header::DataStorageFillValue> {
                 },
             ))
         } else {
-            panic!("Unsupported DataStorageFillValue version {}", version);
+            unimplemented!("Unsupported DataStorageFillValue version {}", version);
         }
     })(input)
 }
@@ -494,11 +506,7 @@ fn attribute(input: &[u8], message_size: u16) -> Result<header::Attribute> {
 
         let data_len = message_size as usize
             - (8 + pad8(name_size) + pad8(datatype_size) + pad8(dataspace_size));
-        let (_, data) = nom::bytes::streaming::take(
-            message_size as usize
-                - (8 + pad8(name_size) + pad8(datatype_size) + pad8(dataspace_size)),
-        )(input)?;
-        let input = &input[data_len..];
+        let (input, data) = nom::bytes::streaming::take(data_len)(input)?;
 
         Ok((
             input,
@@ -570,7 +578,28 @@ pub fn header_message(input: &[u8]) -> Result<header::Message> {
             0x11 => map(symbol_table_message, Message::SymbolTable)(input),
             0x12 => map(object_modification_time, Message::ObjectModificationTime)(input),
             _ => {
-                panic!("unknown header message {}", message_type);
+                unimplemented!("unknown header message {:04X}", message_type);
+            }
+        }
+    })(input)
+}
+
+pub fn global_heap_nth_item(input: &[u8], desired_index: u16) -> Result<&[u8]> {
+    context("global heap", |input| {
+        let (input, _) = tag(b"GCOL")(input)?;
+        let (input, _) = tag([1])(input)?; // Only version 1 exists
+        let (input, _) = tag([0, 0, 0])(input)?; // Reserved zero bytes
+        let (input, _collection_size) = address(8)(input)?;
+
+        loop {
+            // Parse the heap object and check if it's what we are looking for
+            let (input, heap_object_index) = le_u16(input)?;
+            let (input, _reference_count) = le_u16(input)?;
+            let (input, _) = tag([0, 0, 0, 0])(input)?;
+            let (input, object_size) = address(8)(input)?;
+            let (input, object_data) = take(object_size)(input)?;
+            if heap_object_index == desired_index {
+                break Ok((input, object_data));
             }
         }
     })(input)

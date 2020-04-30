@@ -6,5 +6,5 @@ license = "MIT/Apache-2.0"
 edition = "2018"
 
 [dependencies]
-nom = "5.0"
 memmap = "0.7"
+nom = {version = "5.0", default-features = false, features = ["std"]}
