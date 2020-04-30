@@ -1,5 +1,6 @@
 use nom::bytes::streaming::{tag, take};
 use nom::error::context;
+use nom::error::{make_error, ErrorKind};
 use nom::multi::count;
 use nom::number::streaming::{le_u16, le_u24, le_u32, le_u64, le_u8};
 
@@ -381,7 +382,7 @@ fn datatype(input: &[u8], message_size: u16) -> Result<header::DataType> {
                 character_set: (class_bitfields >> 8 & 0b111) as u8,
             },
             10 => Array,
-            _ => panic!("Invalid datatype class: {}", raw_class),
+            _ => return Err(nom::Err::Failure(make_error(input, ErrorKind::Alt))),
         };
 
         Ok((
